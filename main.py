@@ -25,15 +25,16 @@ from linebot.v3.webhooks import (
 
 app = Flask(__name__)
 
-# 1. 先讀取環境變數
+# 讀取環境變數
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# 2. 先初始化 Client 與 LINE Handler（必須在所有 @handler.add 之前！）
+# 初始化新版 Gemini Client
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_ID = "gemini-2.5-flash"
 
+# 初始化 LINE SDK
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
@@ -77,21 +78,18 @@ def callback():
 
 @app.route("/")
 def home():
-    return "Diet Bot is lightweight and running!"
+    return "Diet Bot is running with Smart Image Filtering!"
 
-# 3. 確保 handler 已經宣告好之後，才能使用裝飾器
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
     if not user_text:
         return
 
-    # 嚴格過濾：必須「包含特定關鍵字」或者「訊息以 @ 開頭（代表標記/呼叫）」才觸發
     keywords = ["飲食", "減脂", "熱量", "熱量估估", "能不能吃", "可以吃嗎", "幫我看", "審查", "飲控", "卡路里"]
     is_keyword_triggered = any(kw in user_text for kw in keywords)
     is_tagged = user_text.startswith("@") or "@" in user_text
 
-    # 如果既沒有關鍵字，也沒有標記，直接默默跳過不回應！
     if not is_keyword_triggered and not is_tagged:
         return
 
@@ -126,6 +124,20 @@ def handle_image_message(event):
         mime_type='image/jpeg',
     )
 
+    # 1. 智慧過濾：先問 AI 這張圖是不是食物
+    check_prompt = "請判斷這張圖片裡面是否有食物、飲料、菜單或任何與飲食相關的內容？請只回答「是」或「否」這兩個字。"
+    try:
+        check_response = call_gemini_with_retry([check_prompt, image_part])
+        answer = check_response.text.strip()
+        
+        # 如果 AI 判斷不是食物，直接靜默忽略，不回覆任何訊息
+        if "否" in answer:
+            return
+    except Exception:
+        # 如果過濾過程發生意外（例如 503），保險起見不動作
+        return
+
+    # 2. 確認是食物後，再執行完整的教練熱量評估
     reply_text = ""
     try:
         response = call_gemini_with_retry([SYSTEM_PROMPT, image_part])
