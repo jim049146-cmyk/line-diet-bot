@@ -1,8 +1,8 @@
 import os
 import io
 from flask import Flask, request, abort
-from PIL import Image
 from google import genai
+from google.genai import types
 import google.genai.errors
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -51,7 +51,7 @@ SYSTEM_PROMPT = """
    - 🔴 紅燈（不建議 / 高油高糖高加工，建議避開或偶爾解饞）
 3. 💡 教練調整建議：給予 1~2 句具體的飲食微調建議（例如：少喝湯、去掉雞皮、白飯吃半碗、增加蔬菜等）。
 
-語氣請保持專業, 簡潔, 口語化，適合在社群群組內快速閱讀。
+語氣請保持專業、簡潔、口語化，適合在社群群組內快速閱讀。
 """
 
 @retry(
@@ -78,7 +78,7 @@ def callback():
 
 @app.route("/")
 def home():
-    return "Diet Bot is running smoothly!"
+    return "Diet Bot is lightweight and running!"
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
@@ -93,7 +93,7 @@ def handle_text_message(event):
         response = call_gemini_with_retry(full_prompt)
         reply_text = response.text
     except Exception as e:
-        reply_text = "⚠️ 目前 Google AI 伺服器流量較大（503 尖峰忙碌中），教練正在背景自動重試，請稍候 5 秒鐘後再傳一次給我！"
+        reply_text = "⚠️ 目前 Google AI 伺服器流量較大（503 忙碌中），請稍候 5 秒鐘後再傳一次給我！"
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -112,19 +112,15 @@ def handle_image_message(event):
         line_bot_blob_api = MessagingApiBlob(api_client)
         image_bytes = line_bot_blob_api.get_message_content(message_id)
 
-    # 嚴格控制圖片尺寸 (512x512)，大幅降低記憶體開銷以防 OOM
-    image = Image.open(io.BytesIO(image_bytes))
-    image.thumbnail((512, 512))
-    
-    # 轉為位元組流以釋放 Pillow 物件記憶體
-    img_byte_arr = io.BytesIO()
-    image.save(img_byte_arr, format='JPEG', quality=85)
-    img_byte_arr.seek(0)
-    optimized_image = Image.open(img_byte_arr)
+    # 直接將二進位圖片包裝為 Gemini Part，省去 Pillow 記憶體解碼開銷
+    image_part = types.Part.from_bytes(
+        data=image_bytes,
+        mime_type='image/jpeg',
+    )
 
     reply_text = ""
     try:
-        response = call_gemini_with_retry([SYSTEM_PROMPT, optimized_image])
+        response = call_gemini_with_retry([SYSTEM_PROMPT, image_part])
         reply_text = response.text
     except Exception as e:
         reply_text = "⚠️ 目前圖片分析流量較大（503 忙碌中），請稍後 5 秒再傳一次照片即可！"
