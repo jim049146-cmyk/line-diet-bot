@@ -32,7 +32,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # 2. 先初始化 Client 與 LINE Handler（必須在所有 @handler.add 之前！）
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = "gemini-3.8-flash"
+MODEL_ID = "gemini-2.5-flash"
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
