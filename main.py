@@ -51,13 +51,12 @@ SYSTEM_PROMPT = """
    - 🔴 紅燈（不建議 / 高油高糖高加工，建議避開或偶爾解饞）
 3. 💡 教練調整建議：給予 1~2 句具體的飲食微調建議（例如：少喝湯、去掉雞皮、白飯吃半碗、增加蔬菜等）。
 
-語氣請保持專業、簡潔、口語化，適合在社群群組內快速閱讀。
+語氣請保持專業, 簡潔, 口語化，適合在社群群組內快速閱讀。
 """
 
-# 定義具有指數退避（Exponential Backoff）的自動重試包裝函式
 @retry(
-    stop=stop_after_attempt(3),  # 最多重試 3 次
-    wait=wait_exponential(multiplier=1, min=2, max=10),  # 等待時間隨次數呈指數遞增 (2s, 4s, 8s)
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type((google.genai.errors.ServerError, Exception)),
     reraise=True
 )
@@ -79,7 +78,7 @@ def callback():
 
 @app.route("/")
 def home():
-    return "Diet Bot is running with Auto-Retry!"
+    return "Diet Bot is running smoothly!"
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
@@ -113,16 +112,22 @@ def handle_image_message(event):
         line_bot_blob_api = MessagingApiBlob(api_client)
         image_bytes = line_bot_blob_api.get_message_content(message_id)
 
-    # 圖片縮放防逾時
+    # 嚴格控制圖片尺寸 (512x512)，大幅降低記憶體開銷以防 OOM
     image = Image.open(io.BytesIO(image_bytes))
-    image.thumbnail((1024, 1024))
+    image.thumbnail((512, 512))
+    
+    # 轉為位元組流以釋放 Pillow 物件記憶體
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format='JPEG', quality=85)
+    img_byte_arr.seek(0)
+    optimized_image = Image.open(img_byte_arr)
 
     reply_text = ""
     try:
-        response = call_gemini_with_retry([SYSTEM_PROMPT, image])
+        response = call_gemini_with_retry([SYSTEM_PROMPT, optimized_image])
         reply_text = response.text
     except Exception as e:
-        reply_text = "⚠️ 目前圖片分析流量較大（503 忙碌中），教練多試了幾次還是塞車，請稍後 5 秒再傳一次照片即可！"
+        reply_text = "⚠️ 目前圖片分析流量較大（503 忙碌中），請稍後 5 秒再傳一次照片即可！"
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
