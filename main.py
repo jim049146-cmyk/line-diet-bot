@@ -1,5 +1,6 @@
 import os
 import io
+import time
 from flask import Flask, request, abort
 from PIL import Image
 from google import genai
@@ -35,7 +36,6 @@ MODEL_ID = "gemini-3.8-flash"
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 系統 AI 提示詞設定
 SYSTEM_PROMPT = """
 你是一位嚴格但貼心的專業飲食控制與減脂教練。
 請針對使用者發送的食物照片或飲食文字，進行精準的飲食評估。
@@ -68,19 +68,20 @@ def home():
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
-    
-    keywords = ["飲食", "減脂", "熱量", "熱量估估", "能不能吃", "可以吃嗎", "幫我看", "審查", "飲控"]
-    is_triggered = any(kw in user_text for kw in keywords) or user_text.startswith("@")
-    
-    if not is_triggered:
+    if not user_text:
         return
 
     full_prompt = f"{SYSTEM_PROMPT}\n\n使用者詢問的飲食內容如下：\n{user_text}"
-    response = client.models.generate_content(
-        model=MODEL_ID,
-        contents=full_prompt
-    )
-    reply_text = response.text
+    
+    reply_text = "教練正在思考中..."
+    try:
+        response = client.models.generate_content(model=MODEL_ID, contents=full_prompt)
+        reply_text = response.text
+    except Exception as e:
+        if "503" in str(e) or "UNAVAILABLE" in str(e):
+            reply_text = "⚠️ 目前 AI 伺服器流量較大（Google 503 忙碌中），教練正在深呼吸，請過幾秒鐘再傳一次給我！"
+        else:
+            reply_text = f"⚠️ 發生了一點小狀況：{str(e)}"
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -99,15 +100,21 @@ def handle_image_message(event):
         line_bot_blob_api = MessagingApiBlob(api_client)
         image_bytes = line_bot_blob_api.get_message_content(message_id)
 
-    # 轉為 PIL Image 並進行縮放，避免圖片太大導致 API 逾時
     image = Image.open(io.BytesIO(image_bytes))
     image.thumbnail((1024, 1024))
 
-    response = client.models.generate_content(
-        model=MODEL_ID,
-        contents=[SYSTEM_PROMPT, image]
-    )
-    reply_text = response.text
+    reply_text = ""
+    try:
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents=[SYSTEM_PROMPT, image]
+        )
+        reply_text = response.text
+    except Exception as e:
+        if "503" in str(e) or "UNAVAILABLE" in str(e):
+            reply_text = "⚠️ 目前 Google AI 伺服器正處於尖峰忙碌期（503），請稍候 5 秒鐘後重新傳送照片即可！"
+        else:
+            reply_text = f"⚠️ 圖片分析發生錯誤：{str(e)}"
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
