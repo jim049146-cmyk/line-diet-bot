@@ -1,9 +1,8 @@
 import os
 import io
-import re
 from flask import Flask, request, abort
 from PIL import Image
-import google.generativeai as genai
+from google import genai
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -28,15 +27,15 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# 初始化 Gemini API
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-pro")
+# 初始化新版 Gemini Client (使用 gemini-2.5-flash)
+client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL_ID = "gemini-2.5-flash"
 
 # 初始化 LINE SDK
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 系統 AI 提示詞設定（專屬飲控教練人格）
+# 系統 AI 提示詞設定
 SYSTEM_PROMPT = """
 你是一位嚴格但貼心的專業飲食控制與減脂教練。
 請針對使用者發送的食物照片或飲食文字，進行精準的飲食評估。
@@ -62,7 +61,6 @@ def callback():
         abort(400)
     return 'OK'
 
-# 處理群組文字訊息
 @app.route("/")
 def home():
     return "Diet Bot is running!"
@@ -71,15 +69,17 @@ def home():
 def handle_text_message(event):
     user_text = event.message.text.strip()
     
-    # 群組過濾：避免對所有閒聊都回應，僅觸發帶有關鍵字或問句的訊息
     keywords = ["飲食", "減脂", "熱量", "熱量估估", "能不能吃", "可以吃嗎", "幫我看", "審查", "飲控"]
     is_triggered = any(kw in user_text for kw in keywords) or user_text.startswith("@")
     
     if not is_triggered:
         return
 
-    prompt = f"{SYSTEM_PROMPT}\n\n使用者詢問的飲食內容如下：\n{user_text}"
-    response = model.generate_content(prompt)
+    full_prompt = f"{SYSTEM_PROMPT}\n\n使用者詢問的飲食內容如下：\n{user_text}"
+    response = client.models.generate_content(
+        model=MODEL_ID,
+        contents=full_prompt
+    )
     reply_text = response.text
 
     with ApiClient(configuration) as api_client:
@@ -91,24 +91,22 @@ def handle_text_message(event):
             )
         )
 
-# 處理群組照片訊息
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     message_id = event.message.id
 
-    # 從 LINE 伺服器下載照片
     with ApiClient(configuration) as api_client:
         line_bot_blob_api = MessagingApiBlob(api_client)
         image_bytes = line_bot_blob_api.get_message_content(message_id)
 
-    # 轉為 PIL Image 供 Gemini 辨識
     image = Image.open(io.BytesIO(image_bytes))
 
-    # 傳送給 Gemini 多模態模型分析
-    response = model.generate_content([SYSTEM_PROMPT, image])
+    response = client.models.generate_content(
+        model=MODEL_ID,
+        contents=[SYSTEM_PROMPT, image]
+    )
     reply_text = response.text
 
-    # 回覆結果給群組
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
