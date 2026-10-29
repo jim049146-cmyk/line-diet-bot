@@ -1,9 +1,11 @@
 import os
 import io
-import time
 from flask import Flask, request, abort
 from PIL import Image
 from google import genai
+import google.genai.errors
+
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -36,6 +38,7 @@ MODEL_ID = "gemini-3.8-flash"
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# 系統 AI 提示詞設定
 SYSTEM_PROMPT = """
 你是一位嚴格但貼心的專業飲食控制與減脂教練。
 請針對使用者發送的食物照片或飲食文字，進行精準的飲食評估。
@@ -51,6 +54,19 @@ SYSTEM_PROMPT = """
 語氣請保持專業、簡潔、口語化，適合在社群群組內快速閱讀。
 """
 
+# 定義具有指數退避（Exponential Backoff）的自動重試包裝函式
+@retry(
+    stop=stop_after_attempt(3),  # 最多重試 3 次
+    wait=wait_exponential(multiplier=1, min=2, max=10),  # 等待時間隨次數呈指數遞增 (2s, 4s, 8s)
+    retry=retry_if_exception_type((google.genai.errors.ServerError, Exception)),
+    reraise=True
+)
+def call_gemini_with_retry(contents):
+    return client.models.generate_content(
+        model=MODEL_ID,
+        contents=contents
+    )
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -63,7 +79,7 @@ def callback():
 
 @app.route("/")
 def home():
-    return "Diet Bot is running!"
+    return "Diet Bot is running with Auto-Retry!"
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
@@ -73,15 +89,12 @@ def handle_text_message(event):
 
     full_prompt = f"{SYSTEM_PROMPT}\n\n使用者詢問的飲食內容如下：\n{user_text}"
     
-    reply_text = "教練正在思考中..."
+    reply_text = ""
     try:
-        response = client.models.generate_content(model=MODEL_ID, contents=full_prompt)
+        response = call_gemini_with_retry(full_prompt)
         reply_text = response.text
     except Exception as e:
-        if "503" in str(e) or "UNAVAILABLE" in str(e):
-            reply_text = "⚠️ 目前 AI 伺服器流量較大（Google 503 忙碌中），教練正在深呼吸，請過幾秒鐘再傳一次給我！"
-        else:
-            reply_text = f"⚠️ 發生了一點小狀況：{str(e)}"
+        reply_text = "⚠️ 目前 Google AI 伺服器流量較大（503 尖峰忙碌中），教練正在背景自動重試，請稍候 5 秒鐘後再傳一次給我！"
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -100,21 +113,16 @@ def handle_image_message(event):
         line_bot_blob_api = MessagingApiBlob(api_client)
         image_bytes = line_bot_blob_api.get_message_content(message_id)
 
+    # 圖片縮放防逾時
     image = Image.open(io.BytesIO(image_bytes))
     image.thumbnail((1024, 1024))
 
     reply_text = ""
     try:
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=[SYSTEM_PROMPT, image]
-        )
+        response = call_gemini_with_retry([SYSTEM_PROMPT, image])
         reply_text = response.text
     except Exception as e:
-        if "503" in str(e) or "UNAVAILABLE" in str(e):
-            reply_text = "⚠️ 目前 Google AI 伺服器正處於尖峰忙碌期（503），請稍候 5 秒鐘後重新傳送照片即可！"
-        else:
-            reply_text = f"⚠️ 圖片分析發生錯誤：{str(e)}"
+        reply_text = "⚠️ 目前圖片分析流量較大（503 忙碌中），教練多試了幾次還是塞車，請稍後 5 秒再傳一次照片即可！"
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
