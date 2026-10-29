@@ -27,7 +27,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# 初始化新版 Gemini Client (使用 gemini-2.5-flash)
+# 初始化新版 Gemini Client
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_ID = "gemini-3.8-flash"
 
@@ -99,7 +99,9 @@ def handle_image_message(event):
         line_bot_blob_api = MessagingApiBlob(api_client)
         image_bytes = line_bot_blob_api.get_message_content(message_id)
 
+    # 轉為 PIL Image 並進行縮放，避免圖片太大導致 API 逾時
     image = Image.open(io.BytesIO(image_bytes))
+    image.thumbnail((1024, 1024))
 
     response = client.models.generate_content(
         model=MODEL_ID,
