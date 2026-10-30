@@ -102,35 +102,43 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         full_ticker = clean_ticker
 
     try:
-        stock = yf.Ticker(full_ticker)
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+
+        stock = yf.Ticker(full_ticker, session=session)
         price_history = stock.history(period="1d")
         if price_history.empty:
             full_ticker = f"{clean_ticker}.TWO"
-            stock = yf.Ticker(full_ticker)
+            stock = yf.Ticker(full_ticker, session=session)
             price_history = stock.history(period="1d")
             if price_history.empty:
                 return f"⚠️ 找不到股票代號 [{clean_ticker}] 的數據，請確認台股代號是否正確。"
         
         current_price = round(price_history['Close'].iloc[-1], 2)
-        
         info = stock.info
         est_annual_eps = None
         
-        # 1. 嘗試從 info 抓取
+        # 1. 優先嘗試直接抓取 trailingEps 或 forwardEps
         trailing_eps = info.get('trailingEps')
         forward_eps = info.get('forwardEps')
-        print(f"[{clean_ticker}] info trailingEps: {trailing_eps}, forwardEps: {forward_eps}") # 輸出到 Render Log
         
         if trailing_eps and trailing_eps > 0:
             est_annual_eps = round(trailing_eps, 2)
         elif forward_eps and forward_eps > 0:
             est_annual_eps = round(forward_eps, 2)
         
-        # 2. 備援機制：從季報計算
+        # 2. 絕招：如果 EPS 拿不到，透過現有的「目前股價 / 本益比(trailingPE)」直接反推 TTM EPS！
+        if not est_annual_eps or est_annual_eps <= 0:
+            trailing_pe = info.get('trailingPE')
+            if trailing_pe and trailing_pe > 0:
+                est_annual_eps = round(current_price / trailing_pe, 2)
+
+        # 3. 最終備援：若前兩者皆失敗，嘗試從季報加總
         if not est_annual_eps or est_annual_eps <= 0:
             try:
                 q_fin = stock.quarterly_financials
-                print(f"[{clean_ticker}] q_fin columns/index: {q_fin.index if not q_fin.empty else 'Empty'}") # 輸出到 Log
                 if not q_fin.empty:
                     net_income_row = None
                     for name in ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing Operation']:
@@ -141,24 +149,22 @@ def analyze_stock_value(ticker_symbol: str) -> str:
                     if net_income_row is not None and len(net_income_row) >= 4:
                         ttm_net_income = net_income_row.iloc[:4].sum()
                         shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
-                        print(f"[{clean_ticker}] TTM Net Income: {ttm_net_income}, Shares: {shares}") # 輸出到 Log
-                        
                         if shares and shares > 0:
                             est_annual_eps = round(ttm_net_income / shares, 2)
-            except Exception as ex:
-                print(f"[{clean_ticker}] Q-fin error: {ex}")
+            except Exception:
+                pass
 
         if not est_annual_eps or est_annual_eps <= 0:
             return f"⚠️ [{clean_ticker}] 最近期 EPS 數據異常或無法取得，不適用本益比估價法。"
 
-        # 3. 設定歷史本益比基準乘數 (低 15x / 均 22x / 高 28x)
+        # 設定歷史本益比基準乘數 (低 15x / 均 22x / 高 28x)
         low_pe = 15.0
         avg_pe = 22.0
         high_pe = 28.0
         
-        green_price = round(est_annual_eps * low_pe, 1)
-        yellow_price = round(est_annual_eps * avg_pe, 1)
-        red_price = round(est_annual_eps * high_pe, 1)
+        green_price = round(est_annual_eps * low_pe, 1)   # 🟢 綠燈 (特價區)
+        yellow_price = round(est_annual_eps * avg_pe, 1)  # 🟡 黃燈 (合理區)
+        red_price = round(est_annual_eps * high_pe, 1)    # 🔴 紅燈 (昂貴區)
         
         if current_price <= green_price:
             status_light = "🟢 綠燈（特價區 / 安全邊際）"
