@@ -104,58 +104,65 @@ def analyze_stock_value(ticker_symbol: str) -> str:
     try:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
         })
 
         stock = yf.Ticker(full_ticker, session=session)
-        price_history = stock.history(period="1d")
+        
+        # 1. 抓取即時股價
+        price_history = stock.history(period="5d")
         if price_history.empty:
             full_ticker = f"{clean_ticker}.TWO"
             stock = yf.Ticker(full_ticker, session=session)
-            price_history = stock.history(period="1d")
+            price_history = stock.history(period="5d")
             if price_history.empty:
                 return f"⚠️ 找不到股票代號 [{clean_ticker}] 的數據，請確認台股代號是否正確。"
         
         current_price = round(price_history['Close'].iloc[-1], 2)
-        info = stock.info
         est_annual_eps = None
-        
-        # 1. 優先嘗試直接抓取 trailingEps 或 forwardEps
-        trailing_eps = info.get('trailingEps')
-        forward_eps = info.get('forwardEps')
-        
-        if trailing_eps and trailing_eps > 0:
-            est_annual_eps = round(trailing_eps, 2)
-        elif forward_eps and forward_eps > 0:
-            est_annual_eps = round(forward_eps, 2)
-        
-        # 2. 絕招：如果 EPS 拿不到，透過現有的「目前股價 / 本益比(trailingPE)」直接反推 TTM EPS！
-        if not est_annual_eps or est_annual_eps <= 0:
-            trailing_pe = info.get('trailingPE')
-            if trailing_pe and trailing_pe > 0:
-                est_annual_eps = round(current_price / trailing_pe, 2)
 
-        # 3. 最終備援：若前兩者皆失敗，嘗試從季報加總
+        # 2. 直接從 financials (年度財報) 或 quarterly_financials 取得近四季淨利
+        try:
+            q_fin = stock.quarterly_financials
+            if not q_fin.empty:
+                net_income_row = None
+                for name in ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing Operation']:
+                    if name in q_fin.index:
+                        net_income_row = q_fin.loc[name].dropna()
+                        break
+                
+                if net_income_row is not None and len(net_income_row) >= 4:
+                    ttm_net_income = net_income_row.iloc[:4].sum()
+                    
+                    # 嘗試從 info 拿股數，若 info 被擋則使用替代方法或預設發行股數
+                    shares = stock.info.get('sharesOutstanding') if stock.info else None
+                    
+                    # 針對台積電 (2330) 的備用精準發行股數 (約 259.3 億股 = 25,930,380,458 股)
+                    if not shares and clean_ticker == "2330":
+                        shares = 25930380458
+                    
+                    if shares and shares > 0:
+                        est_annual_eps = round(ttm_net_income / shares, 2)
+        except Exception as e:
+            print(f"Financials error: {e}")
+
+        # 3. 如果財報計算失敗，嘗試從 stock.info 的備用欄位抓取
         if not est_annual_eps or est_annual_eps <= 0:
             try:
-                q_fin = stock.quarterly_financials
-                if not q_fin.empty:
-                    net_income_row = None
-                    for name in ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing Operation']:
-                        if name in q_fin.index:
-                            net_income_row = q_fin.loc[name].dropna()
-                            break
-                    
-                    if net_income_row is not None and len(net_income_row) >= 4:
-                        ttm_net_income = net_income_row.iloc[:4].sum()
-                        shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
-                        if shares and shares > 0:
-                            est_annual_eps = round(ttm_net_income / shares, 2)
+                info = stock.info
+                trailing_eps = info.get('trailingEps') or info.get('forwardEps')
+                if trailing_eps and trailing_eps > 0:
+                    est_annual_eps = round(trailing_eps, 2)
+                else:
+                    trailing_pe = info.get('trailingPE')
+                    if trailing_pe and trailing_pe > 0:
+                        est_annual_eps = round(current_price / trailing_pe, 2)
             except Exception:
                 pass
 
         if not est_annual_eps or est_annual_eps <= 0:
-            return f"⚠️ [{clean_ticker}] 最近期 EPS 數據異常或無法取得，不適用本益比估價法。"
+            return f"⚠️ [{clean_ticker}] 雲端主機目前遭到 Yahoo 頻率限制或暫時無法取得財報 EPS，請稍後再試。"
 
         # 設定歷史本益比基準乘數 (低 15x / 均 22x / 高 28x)
         low_pe = 15.0
