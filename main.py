@@ -106,12 +106,12 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         full_ticker = clean_ticker
 
     try:
-        # 1. 用 yfinance 抓取即時股價
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0"})
         stock = yf.Ticker(full_ticker, session=session)
-        price_history = stock.history(period="1d")
         
+        # 1. 抓取即時股價
+        price_history = stock.history(period="1d")
         if price_history.empty:
             full_ticker = f"{clean_ticker}.TWO"
             stock = yf.Ticker(full_ticker, session=session)
@@ -121,25 +121,112 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         
         current_price = round(price_history['Close'].iloc[-1], 2)
 
-        # 2. 抓取證交所官方本益比與淨值比資料 (BWIBBU_ALL)
+        # 2. 嘗試從 yfinance 財報計算「近四季真實動能 TTM EPS」或「最新半年度年化 EPS」
+        est_annual_eps = None
+        eps_source_desc = "官方歷史本益比"
+        
+        try:
+            q_fin = stock.quarterly_financials
+            if not q_fin.empty:
+                net_income_row = None
+                for name in ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing Operation']:
+                    if name in q_fin.index:
+                        net_income_row = q_fin.loc[name].dropna()
+                        break
+                
+                if net_income_row is not None and len(net_income_row) >= 2:
+                    shares = stock.info.get('sharesOutstanding') or stock.info.get('impliedSharesOutstanding')
+                    
+                    if not shares:
+                        # 備用：若 info 被擋，透過市值與股價反推或給予預設
+                        pass
+
+                    if shares and shares > 0:
+                        # 策略 A：若最近兩季（當前最新半年度）成長強勁，用「最新兩季總和 × 2」作為動能年化預估
+                        recent_h1_income = net_income_row.iloc[:2].sum()
+                        h1_eps = recent_h1_income / shares
+                        
+                        # 策略 B：近四季 (TTM) 淨利總和
+                        if len(net_income_row) >= 4:
+                            ttm_income = net_income_row.iloc[:4].sum()
+                            ttm_eps = ttm_income / shares
+                        else:
+                            ttm_eps = h1_eps * 2
+
+                        # 智慧取捨：如果 H1 年化表現明顯高於歷史 TTM，採用更能反映現狀的「動能預估 EPS」
+                        forward_run_rate_eps = round(h1_eps * 2, 2)
+                        if forward_run_rate_eps > ttm_eps:
+                            est_annual_eps = forward_run_rate_eps
+                            eps_source_desc = "最新財報動能年化 (Forward Run-Rate)"
+                        else:
+                            est_annual_eps = round(ttm_eps, 2)
+                            eps_source_desc = "近四季滾動 (TTM)"
+        except Exception:
+            pass
+
+        # 3. 如果財報動能計算失敗，退回使用證交所官方本益比反推
+        pe_ratio = None
+        if not est_annual_eps or est_annual_eps <= 0:
+            url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                for item in response.json():
+                    if item.get("Code") == clean_ticker:
+                        pe_str = item.get("PEratio", "").strip()
+                        if pe_str and pe_str != "-" and pe_str != "0":
+                            try:
+                                pe_ratio = float(pe_str)
+                                est_annual_eps = round(current_price / pe_ratio, 2)
+                                eps_source_desc = "官方歷史本益比反推"
+                            except ValueError:
+                                pass
+                        break
+
+        if not est_annual_eps or est_annual_eps <= 0:
+            # 嘗試走 P/B 淨值比備用邏輯 (如中鋼)
+            return fallback_to_pb_valuation(stock, clean_ticker, current_price)
+
+        # 4. 設定歷史本益比基準乘數並計算區間 (低 15x / 均 22x / 高 28x)
+        low_pe, avg_pe, high_pe = 15.0, 22.0, 28.0
+        green_price = round(est_annual_eps * low_pe, 1)      # 🟢 特價區
+        yellow_price = round(est_annual_eps * avg_pe, 1)  # 🟡 合理區
+        red_price = round(est_annual_eps * high_pe, 1)    # 🔴 昂貴區
+        
+        if current_price <= green_price:
+            status_light = "🟢 綠燈（特價區 / 安全邊際）"
+            action_advice = "現價低於安全邊際，具備較高的價值投資買點！"
+        elif current_price <= yellow_price:
+            status_light = "🟡 黃燈（合理區 / 定期定額）"
+            action_advice = "現價處於合理評價區，適合分批定期定額長線佈局。"
+        else:
+            status_light = "🔴 紅燈（昂貴區 / 居高思危）"
+            action_advice = "市場評價偏高，建議暫時觀望或避免追高。"
+
+        report = (
+            f"📊 [{clean_ticker}] 智慧價值評估報告 (動能成長版)\n"
+            f"---------------------------------\n"
+            f"💵 目前盤中/收盤價：{current_price} 元\n"
+            f"📈 參考 EPS ({eps_source_desc})：{est_annual_eps} 元\n"
+            f"---------------------------------\n"
+            f"🚦 預估本益比估價區間：\n"
+            f"🟢 綠燈 (特價區)  ：{green_price} 元 ({low_pe}x PE)\n"
+            f"🟡 黃燈 (合理區)  ：{yellow_price} 元 ({avg_pe}x PE)\n"
+            f"🔴 紅燈 (昂貴區)  ：{red_price} 元 ({high_pe}x PE)\n\n"
+            f"🎯 當前評級：\n{status_light}\n💡 建議：{action_advice}"
+        )
+        return report
+    except Exception as e:
+        return f"❌ 計算過程發生錯誤：{str(e)}"
+
+def fallback_to_pb_valuation(stock, clean_ticker, current_price):
+    """ 傳產與景氣循環股專用的 P/B 淨值比備用邏輯 """
+    try:
         url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         response = requests.get(url, timeout=10)
-        
-        pe_ratio = None
         pb_ratio = None
-        
         if response.status_code == 200:
             for item in response.json():
                 if item.get("Code") == clean_ticker:
-                    # 嘗試抓取本益比
-                    pe_str = item.get("PEratio", "").strip()
-                    if pe_str and pe_str != "-" and pe_str != "0":
-                        try:
-                            pe_ratio = float(pe_str)
-                        except ValueError:
-                            pass
-                    
-                    # 嘗試抓取股價淨值比 (PB)
                     for pb_key in ["PBratio", "PB", "PriceToBookRatio"]:
                         pb_str = item.get(pb_key, "").strip()
                         if pb_str and pb_str != "-" and pb_str != "0":
@@ -149,70 +236,28 @@ def analyze_stock_value(ticker_symbol: str) -> str:
                             except ValueError:
                                 pass
                     break
-
-        # ==========================================
-        # 模式 A：若有正常本益比，走標準本益比估價法
-        # ==========================================
-        if pe_ratio and pe_ratio > 0:
-            est_annual_eps = round(current_price / pe_ratio, 2)
-            low_pe, avg_pe, high_pe = 15.0, 22.0, 28.0
-            green_price = round(est_annual_eps * low_pe, 1)
-            yellow_price = round(est_annual_eps * avg_pe, 1)
-            red_price = round(est_annual_eps * high_pe, 1)
-            
-            if current_price <= green_price:
-                status_light = "🟢 綠燈（特價區 / 安全邊際）"
-                action_advice = "現價低於安全邊際，具備較高的價值投資買點！"
-            elif current_price <= yellow_price:
-                status_light = "🟡 黃燈（合理區 / 定期定額）"
-                action_advice = "現價處於合理評價區，適合分批定期定額長線佈局。"
-            else:
-                status_light = "🔴 紅燈（昂貴區 / 居高思危）"
-                action_advice = "市場評價偏高，建議暫時觀望或避免追高。"
-
-            return (
-                f"📊 [{clean_ticker}] 智慧價值評估報告 (本益比法)\n"
-                f"---------------------------------\n"
-                f"💵 目前盤中/收盤價：{current_price} 元\n"
-                f"📈 官方本益比換算 EPS：{est_annual_eps} 元 (PE: {pe_ratio})\n\n"
-                f"🚦 歷史本益比估價區間：\n"
-                f"🟢 綠燈 (特價區)  ：{green_price} 元 ({low_pe}x PE)\n"
-                f"🟡 黃燈 (合理區)  ：{yellow_price} 元 ({avg_pe}x PE)\n"
-                f"🔴 紅燈 (昂貴區)  ：{red_price} 元 ({high_pe}x PE)\n\n"
-                f"🎯 當前評級：\n{status_light}\n💡 建議：{action_advice}"
-            )
-
-        # ==========================================
-        # 模式 B：若本益比不適用（如中鋼等景氣循環股），自動切換為 P/B 淨值比法！
-        # ==========================================
-        elif pb_ratio and pb_ratio > 0:
+        
+        if pb_ratio and pb_ratio > 0:
             if pb_ratio < 1.0:
-                pb_status = "🟢 綠燈（淨值以下 / 歷史相對底部 / 資產防禦區）"
-                pb_advice = "股價低於每股淨值，以傳統重資產企業來說具備強大的下檔資產保護與安全邊際！"
+                pb_status = "🟢 綠燈（淨值以下 / 資產防禦區）"
+                pb_advice = "股價低於每股淨值，具備強大下檔資產保護力！"
             elif pb_ratio <= 1.3:
                 pb_status = "🟡 黃燈（合理評價區）"
-                pb_advice = "股價處於合理淨值區間，適合依殖利率與景氣循環位階進行長線配置。"
+                pb_advice = "股價處於合理淨值區間，可依殖利率長線佈局。"
             else:
                 pb_status = "🔴 紅燈（相對高檔區）"
-                pb_advice = "股價對應淨值偏高，資產防禦優勢降低，建議留意景氣波動風險。"
+                pb_advice = "股價對應淨值偏高，建議留意波動風險。"
 
             return (
                 f"📊 [{clean_ticker}] 智慧價值評估報告 (股價淨值比法)\n"
                 f"---------------------------------\n"
-                f"💡 註：本公司近期獲利波動，本益比暫不適用，已自動切換為傳產/景氣循環股專用的「淨值比」評估。\n"
-                f"---------------------------------\n"
                 f"💵 目前盤中/收盤價：{current_price} 元\n"
                 f"📉 目前官方股價淨值比 (P/B)：{pb_ratio} 倍\n\n"
-                f"🎯 淨值比評價分級：\n"
-                f"{pb_status}\n"
-                f"💡 建議：{pb_advice}"
+                f"🎯 評價分級：\n{pb_status}\n💡 建議：{pb_advice}"
             )
-
-        else:
-            return f"⚠️ [{clean_ticker}] 目前官方本益比與淨值比數據皆無法取得，暫時無法進行量化估價。"
-
-    except Exception as e:
-        return f"❌ 計算過程發生錯誤：{str(e)}"
+    except Exception:
+        pass
+    return f"⚠️ [{clean_ticker}] 目前財報與官方估價數據皆無法取得，暫無法進行量化評估。"
 # ----------------------------------------------------
 # 文字訊息處理（支援「估價」指令與原本的飲食減脂教練）
 # ----------------------------------------------------
