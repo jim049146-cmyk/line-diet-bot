@@ -103,7 +103,7 @@ def analyze_stock_value(ticker_symbol: str) -> str:
     if not (clean_ticker.endswith(".TW") or clean_ticker.endswith(".TWO")):
         full_ticker = f"{clean_ticker}.TW"
     else:
-        full_ticker = clean_ticker
+        full_ticker = full_ticker
 
     try:
         session = requests.Session()
@@ -121,50 +121,44 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         
         current_price = round(price_history['Close'].iloc[-1], 2)
 
-        # 2. 嘗試從 yfinance 財報計算「近四季真實動能 TTM EPS」或「最新半年度年化 EPS」
+        # ==========================================
+        # 2. 【強制優先】嘗試從季報表直接抓取每股盈餘 (Basic EPS) 計算動能
+        # ==========================================
         est_annual_eps = None
-        eps_source_desc = "官方歷史本益比"
+        eps_source_desc = "官方歷史本益比反推"
         
         try:
             q_fin = stock.quarterly_financials
             if not q_fin.empty:
-                net_income_row = None
-                for name in ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing Operation']:
+                eps_row = None
+                # 尋找財報中的每股盈餘欄位
+                for name in ['Basic EPS', 'Diluted EPS', 'Basic Earnings Per Share']:
                     if name in q_fin.index:
-                        net_income_row = q_fin.loc[name].dropna()
+                        eps_row = q_fin.loc[name].dropna()
                         break
                 
-                if net_income_row is not None and len(net_income_row) >= 2:
-                    shares = stock.info.get('sharesOutstanding') or stock.info.get('impliedSharesOutstanding')
+                if eps_row is not None and len(eps_row) >= 2:
+                    # 最近兩季（例如最新 H1）的 EPS 總和
+                    recent_h1_eps = eps_row.iloc[:2].sum()
+                    forward_run_rate_eps = round(recent_h1_eps * 2, 2) # 半年度年化
                     
-                    if not shares:
-                        # 備用：若 info 被擋，透過市值與股價反推或給予預設
-                        pass
+                    # 近四季 (TTM) EPS 總和
+                    if len(eps_row) >= 4:
+                        ttm_eps = round(eps_row.iloc[:4].sum(), 2)
+                    else:
+                        ttm_eps = forward_run_rate_eps
 
-                    if shares and shares > 0:
-                        # 策略 A：若最近兩季（當前最新半年度）成長強勁，用「最新兩季總和 × 2」作為動能年化預估
-                        recent_h1_income = net_income_row.iloc[:2].sum()
-                        h1_eps = recent_h1_income / shares
-                        
-                        # 策略 B：近四季 (TTM) 淨利總和
-                        if len(net_income_row) >= 4:
-                            ttm_income = net_income_row.iloc[:4].sum()
-                            ttm_eps = ttm_income / shares
-                        else:
-                            ttm_eps = h1_eps * 2
-
-                        # 智慧取捨：如果 H1 年化表現明顯高於歷史 TTM，採用更能反映現狀的「動能預估 EPS」
-                        forward_run_rate_eps = round(h1_eps * 2, 2)
-                        if forward_run_rate_eps > ttm_eps:
-                            est_annual_eps = forward_run_rate_eps
-                            eps_source_desc = "最新財報動能年化 (Forward Run-Rate)"
-                        else:
-                            est_annual_eps = round(ttm_eps, 2)
-                            eps_source_desc = "近四季滾動 (TTM)"
+                    # 強制採用反應現狀較快的數值（取 H1 年化與 TTM 的較高者或最新動能）
+                    if forward_run_rate_eps > 0:
+                        est_annual_eps = forward_run_rate_eps
+                        eps_source_desc = f"最新財報動能年化 (H1累計 {round(recent_h1_eps, 2)}元 × 2)"
+                    elif ttm_eps > 0:
+                        est_annual_eps = ttm_eps
+                        eps_source_desc = "近四季滾動總和 (TTM)"
         except Exception:
             pass
 
-        # 3. 如果財報動能計算失敗，退回使用證交所官方本益比反推
+        # 3. 如果季報動能因網路完全抓不到，才退回使用證交所官方本益比反推
         pe_ratio = None
         if not est_annual_eps or est_annual_eps <= 0:
             url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
@@ -177,13 +171,12 @@ def analyze_stock_value(ticker_symbol: str) -> str:
                             try:
                                 pe_ratio = float(pe_str)
                                 est_annual_eps = round(current_price / pe_ratio, 2)
-                                eps_source_desc = "官方歷史本益比反推"
+                                eps_source_desc = "官方歷史本益比反推 (備用)"
                             except ValueError:
                                 pass
                         break
 
         if not est_annual_eps or est_annual_eps <= 0:
-            # 嘗試走 P/B 淨值比備用邏輯 (如中鋼)
             return fallback_to_pb_valuation(stock, clean_ticker, current_price)
 
         # 4. 設定歷史本益比基準乘數並計算區間 (低 15x / 均 22x / 高 28x)
@@ -203,7 +196,7 @@ def analyze_stock_value(ticker_symbol: str) -> str:
             action_advice = "市場評價偏高，建議暫時觀望或避免追高。"
 
         report = (
-            f"📊 [{clean_ticker}] 智慧價值評估報告 (動能成長版)\n"
+            f"📊 [{clean_ticker}] 智慧價值評估報告 (動能優先版)\n"
             f"---------------------------------\n"
             f"💵 目前盤中/收盤價：{current_price} 元\n"
             f"📈 參考 EPS ({eps_source_desc})：{est_annual_eps} 元\n"
