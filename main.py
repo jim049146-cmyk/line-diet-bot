@@ -106,7 +106,7 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         full_ticker = clean_ticker
 
     try:
-        # 1. 用絕對不會被鎖的 yfinance 抓取即時股價
+        # 1. 用 yfinance 抓取即時股價
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0"})
         stock = yf.Ticker(full_ticker, session=session)
@@ -121,61 +121,96 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         
         current_price = round(price_history['Close'].iloc[-1], 2)
 
-        # 2. 抓取證交所官方本益比資料 (BWIBBU_ALL)
+        # 2. 抓取證交所官方本益比與淨值比資料 (BWIBBU_ALL)
         url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         response = requests.get(url, timeout=10)
         
         pe_ratio = None
+        pb_ratio = None
+        
         if response.status_code == 200:
             for item in response.json():
                 if item.get("Code") == clean_ticker:
+                    # 嘗試抓取本益比
                     pe_str = item.get("PEratio", "").strip()
                     if pe_str and pe_str != "-" and pe_str != "0":
                         try:
                             pe_ratio = float(pe_str)
                         except ValueError:
                             pass
+                    
+                    # 嘗試抓取股價淨值比 (PB)
+                    for pb_key in ["PBratio", "PB", "PriceToBookRatio"]:
+                        pb_str = item.get(pb_key, "").strip()
+                        if pb_str and pb_str != "-" and pb_str != "0":
+                            try:
+                                pb_ratio = float(pb_str)
+                                break
+                            except ValueError:
+                                pass
                     break
 
-        if not pe_ratio or pe_ratio <= 0:
-            return f"⚠️ [{clean_ticker}] 目前官方本益比資料為負數或暫不適用（無本益比資料），無法進行本益比估價。"
+        # ==========================================
+        # 模式 A：若有正常本益比，走標準本益比估價法
+        # ==========================================
+        if pe_ratio and pe_ratio > 0:
+            est_annual_eps = round(current_price / pe_ratio, 2)
+            low_pe, avg_pe, high_pe = 15.0, 22.0, 28.0
+            green_price = round(est_annual_eps * low_pe, 1)
+            yellow_price = round(est_annual_eps * avg_pe, 1)
+            red_price = round(est_annual_eps * high_pe, 1)
+            
+            if current_price <= green_price:
+                status_light = "🟢 綠燈（特價區 / 安全邊際）"
+                action_advice = "現價低於安全邊際，具備較高的價值投資買點！"
+            elif current_price <= yellow_price:
+                status_light = "🟡 黃燈（合理區 / 定期定額）"
+                action_advice = "現價處於合理評價區，適合分批定期定額長線佈局。"
+            else:
+                status_light = "🔴 紅燈（昂貴區 / 居高思危）"
+                action_advice = "市場評價偏高，建議暫時觀望或避免追高。"
 
-        # 3. 自動計算 EPS (EPS = 目前股價 / 本益比)
-        est_annual_eps = round(current_price / pe_ratio, 2)
+            return (
+                f"📊 [{clean_ticker}] 智慧價值評估報告 (本益比法)\n"
+                f"---------------------------------\n"
+                f"💵 目前盤中/收盤價：{current_price} 元\n"
+                f"📈 官方本益比換算 EPS：{est_annual_eps} 元 (PE: {pe_ratio})\n\n"
+                f"🚦 歷史本益比估價區間：\n"
+                f"🟢 綠燈 (特價區)  ：{green_price} 元 ({low_pe}x PE)\n"
+                f"🟡 黃燈 (合理區)  ：{yellow_price} 元 ({avg_pe}x PE)\n"
+                f"🔴 紅燈 (昂貴區)  ：{red_price} 元 ({high_pe}x PE)\n\n"
+                f"🎯 當前評級：\n{status_light}\n💡 建議：{action_advice}"
+            )
 
-        # 4. 設定歷史本益比基準乘數 (低 15x / 均 22x / 高 28x)
-        low_pe = 15.0
-        avg_pe = 22.0
-        high_pe = 28.0
-        
-        green_price = round(est_annual_eps * low_pe, 1)   # 🟢 綠燈 (特價區)
-        yellow_price = round(est_annual_eps * avg_pe, 1)  # 🟡 黃燈 (合理區)
-        red_price = round(est_annual_eps * high_pe, 1)    # 🔴 紅燈 (昂貴區)
-        
-        if current_price <= green_price:
-            status_light = "🟢 綠燈（特價區 / 安全邊際）"
-            action_advice = "現價低於安全邊際，具備較高的價值投資買點！"
-        elif current_price <= yellow_price:
-            status_light = "🟡 黃燈（合理區 / 定期定額）"
-            action_advice = "現價處於合理評價區，適合分批定期定額長線佈局。"
+        # ==========================================
+        # 模式 B：若本益比不適用（如中鋼等景氣循環股），自動切換為 P/B 淨值比法！
+        # ==========================================
+        elif pb_ratio and pb_ratio > 0:
+            if pb_ratio < 1.0:
+                pb_status = "🟢 綠燈（淨值以下 / 歷史相對底部 / 資產防禦區）"
+                pb_advice = "股價低於每股淨值，以傳統重資產企業來說具備強大的下檔資產保護與安全邊際！"
+            elif pb_ratio <= 1.3:
+                pb_status = "🟡 黃燈（合理評價區）"
+                pb_advice = "股價處於合理淨值區間，適合依殖利率與景氣循環位階進行長線配置。"
+            else:
+                pb_status = "🔴 紅燈（相對高檔區）"
+                pb_advice = "股價對應淨值偏高，資產防禦優勢降低，建議留意景氣波動風險。"
+
+            return (
+                f"📊 [{clean_ticker}] 智慧價值評估報告 (股價淨值比法)\n"
+                f"---------------------------------\n"
+                f"💡 註：本公司近期獲利波動，本益比暫不適用，已自動切換為傳產/景氣循環股專用的「淨值比」評估。\n"
+                f"---------------------------------\n"
+                f"💵 目前盤中/收盤價：{current_price} 元\n"
+                f"📉 目前官方股價淨值比 (P/B)：{pb_ratio} 倍\n\n"
+                f"🎯 淨值比評價分級：\n"
+                f"{pb_status}\n"
+                f"💡 建議：{pb_advice}"
+            )
+
         else:
-            status_light = "🔴 紅燈（昂貴區 / 居高思危）"
-            action_advice = "市場評價偏高，建議暫時觀望或避免追高。"
+            return f"⚠️ [{clean_ticker}] 目前官方本益比與淨值比數據皆無法取得，暫時無法進行量化估價。"
 
-        report = (
-            f"📊 [{clean_ticker}] 智慧價值評估報告\n"
-            f"---------------------------------\n"
-            f"💵 目前盤中/收盤價：{current_price} 元\n"
-            f"📈 官方本益比換算 EPS：{est_annual_eps} 元 (PE: {pe_ratio})\n\n"
-            f"🚦 歷史本益比估價區間：\n"
-            f"🟢 綠燈 (特價區)  ：{green_price} 元 ({low_pe}x PE)\n"
-            f"🟡 黃燈 (合理區)  ：{yellow_price} 元 ({avg_pe}x PE)\n"
-            f"🔴 紅燈 (昂貴區)  ：{red_price} 元 ({high_pe}x PE)\n\n"
-            f"🎯 當前評級：\n"
-            f"{status_light}\n"
-            f"💡 建議：{action_advice}"
-        )
-        return report
     except Exception as e:
         return f"❌ 計算過程發生錯誤：{str(e)}"
 # ----------------------------------------------------
