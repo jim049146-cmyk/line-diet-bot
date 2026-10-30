@@ -116,19 +116,21 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         info = stock.info
         est_annual_eps = None
         
-        # 1. 先嘗試從 info 抓取 trailingEps 或 forwardEps
+        # 1. 嘗試從 info 抓取
         trailing_eps = info.get('trailingEps')
         forward_eps = info.get('forwardEps')
+        print(f"[{clean_ticker}] info trailingEps: {trailing_eps}, forwardEps: {forward_eps}") # 輸出到 Render Log
         
         if trailing_eps and trailing_eps > 0:
             est_annual_eps = round(trailing_eps, 2)
         elif forward_eps and forward_eps > 0:
             est_annual_eps = round(forward_eps, 2)
         
-        # 2. 備援機制：如果 info 抓不到，改從季報 (quarterly_financials) 計算近四季 TTM EPS
+        # 2. 備援機制：從季報計算
         if not est_annual_eps or est_annual_eps <= 0:
             try:
                 q_fin = stock.quarterly_financials
+                print(f"[{clean_ticker}] q_fin columns/index: {q_fin.index if not q_fin.empty else 'Empty'}") # 輸出到 Log
                 if not q_fin.empty:
                     net_income_row = None
                     for name in ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing Operation']:
@@ -138,11 +140,13 @@ def analyze_stock_value(ticker_symbol: str) -> str:
                     
                     if net_income_row is not None and len(net_income_row) >= 4:
                         ttm_net_income = net_income_row.iloc[:4].sum()
-                        shares = info.get('sharesOutstanding')
+                        shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
+                        print(f"[{clean_ticker}] TTM Net Income: {ttm_net_income}, Shares: {shares}") # 輸出到 Log
+                        
                         if shares and shares > 0:
                             est_annual_eps = round(ttm_net_income / shares, 2)
-            except Exception:
-                pass
+            except Exception as ex:
+                print(f"[{clean_ticker}] Q-fin error: {ex}")
 
         if not est_annual_eps or est_annual_eps <= 0:
             return f"⚠️ [{clean_ticker}] 最近期 EPS 數據異常或無法取得，不適用本益比估價法。"
@@ -152,9 +156,9 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         avg_pe = 22.0
         high_pe = 28.0
         
-        green_price = round(est_annual_eps * low_pe, 1)   # 🟢 綠燈 (特價區)
-        yellow_price = round(est_annual_eps * avg_pe, 1)  # 🟡 黃燈 (合理區)
-        red_price = round(est_annual_eps * high_pe, 1)    # 🔴 紅燈 (昂貴區)
+        green_price = round(est_annual_eps * low_pe, 1)
+        yellow_price = round(est_annual_eps * avg_pe, 1)
+        red_price = round(est_annual_eps * high_pe, 1)
         
         if current_price <= green_price:
             status_light = "🟢 綠燈（特價區 / 安全邊際）"
@@ -182,7 +186,6 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         return report
     except Exception as e:
         return f"❌ 計算過程發生錯誤：{str(e)}"
-
 # ----------------------------------------------------
 # 文字訊息處理（支援「估價」指令與原本的飲食減脂教練）
 # ----------------------------------------------------
