@@ -96,44 +96,52 @@ def home():
 # 核心功能：台股價值評估模組 (含 TTM EPS 備援機制)
 # ----------------------------------------------------
 import requests
+import yfinance as yf
 
 def analyze_stock_value(ticker_symbol: str) -> str:
     clean_ticker = ticker_symbol.strip().upper()
-    
+    if not (clean_ticker.endswith(".TW") or clean_ticker.endswith(".TWO")):
+        full_ticker = f"{clean_ticker}.TW"
+    else:
+        full_ticker = clean_ticker
+
     try:
-        # 1. 抓取證交所上市股票本益比與收盤價公開資料 (BWIBBU_ALL)
+        # 1. 用絕對不會被鎖的 yfinance 抓取即時股價
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
+        stock = yf.Ticker(full_ticker, session=session)
+        price_history = stock.history(period="1d")
+        
+        if price_history.empty:
+            full_ticker = f"{clean_ticker}.TWO"
+            stock = yf.Ticker(full_ticker, session=session)
+            price_history = stock.history(period="1d")
+            if price_history.empty:
+                return f"⚠️ 找不到股票代號 [{clean_ticker}] 的股價數據，請確認代號是否正確。"
+        
+        current_price = round(price_history['Close'].iloc[-1], 2)
+
+        # 2. 抓取證交所官方本益比資料 (BWIBBU_ALL)
         url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         response = requests.get(url, timeout=10)
         
-        stock_data = None
+        pe_ratio = None
         if response.status_code == 200:
-            all_stocks = response.json()
-            # 在清單中尋找對應的代號
-            for item in all_stocks:
+            for item in response.json():
                 if item.get("Code") == clean_ticker:
-                    stock_data = item
+                    pe_str = item.get("PEratio", "").strip()
+                    if pe_str and pe_str != "-" and pe_str != "0":
+                        try:
+                            pe_ratio = float(pe_str)
+                        except ValueError:
+                            pass
                     break
-        
-        # 如果上市找不到，可以去櫃買中心(上櫃)找，這邊先以上市為例
-        if not stock_data:
-            return f"⚠️ 找不到股票代號 [{clean_ticker}] 的官方數據，請確認代號是否正確（目前支援上市股票）。"
-        
-        # 2. 從官方資料解析數據
-        # 證交所欄位名稱通常為：Code, Name, PE (本益比), Dividend, Yield 等
-        # 註：有些股票本益比為「發布不適用」或負數會顯示為 '-' 或 '-'
-        current_price = float(stock_data.get("ClosePrice", 0) or stock_data.get("MonthlyAveragePrice", 0))
-        pe_str = stock_data.get("PE", "").strip()
-        
-        if not pe_str or pe_str == "-" or pe_str == "0":
-            return f"⚠️ [{clean_ticker}] 目前本益比數據為負或不適用（無本益比資料），無法進行估價。"
-            
-        pe_ratio = float(pe_str)
-        
-        # 3. 自動反推 EPS (EPS = 股價 / 本益比)
+
+        if not pe_ratio or pe_ratio <= 0:
+            return f"⚠️ [{clean_ticker}] 目前官方本益比資料為負數或暫不適用（無本益比資料），無法進行本益比估價。"
+
+        # 3. 自動計算 EPS (EPS = 目前股價 / 本益比)
         est_annual_eps = round(current_price / pe_ratio, 2)
-        
-        if est_annual_eps <= 0:
-            return f"⚠️ [{clean_ticker}] 計算出的 EPS 異常，不適用本益比估價法。"
 
         # 4. 設定歷史本益比基準乘數 (低 15x / 均 22x / 高 28x)
         low_pe = 15.0
@@ -155,10 +163,10 @@ def analyze_stock_value(ticker_symbol: str) -> str:
             action_advice = "市場評價偏高，建議暫時觀望或避免追高。"
 
         report = (
-            f"📊 [{clean_ticker}] 智慧價值評估報告 (官方數據)\n"
+            f"📊 [{clean_ticker}] 智慧價值評估報告\n"
             f"---------------------------------\n"
-            f"💵 目前收盤/參考價：{current_price} 元\n"
-            f"📈 官方本益比換算 EPS：{est_annual_eps} 元\n\n"
+            f"💵 目前盤中/收盤價：{current_price} 元\n"
+            f"📈 官方本益比換算 EPS：{est_annual_eps} 元 (PE: {pe_ratio})\n\n"
             f"🚦 歷史本益比估價區間：\n"
             f"🟢 綠燈 (特價區)  ：{green_price} 元 ({low_pe}x PE)\n"
             f"🟡 黃燈 (合理區)  ：{yellow_price} 元 ({avg_pe}x PE)\n"
@@ -168,9 +176,8 @@ def analyze_stock_value(ticker_symbol: str) -> str:
             f"💡 建議：{action_advice}"
         )
         return report
-        
     except Exception as e:
-        return f"❌ 讀取證交所官方資料發生錯誤：{str(e)}"
+        return f"❌ 計算過程發生錯誤：{str(e)}"
 # ----------------------------------------------------
 # 文字訊息處理（支援「估價」指令與原本的飲食減脂教練）
 # ----------------------------------------------------
