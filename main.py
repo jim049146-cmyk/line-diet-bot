@@ -1,6 +1,7 @@
 import os
 import io
 import threading
+import requests
 from flask import Flask, request, abort
 from google import genai
 from google.genai import types
