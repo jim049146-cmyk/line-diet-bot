@@ -95,73 +95,47 @@ def home():
 # ----------------------------------------------------
 # 核心功能：台股價值評估模組 (含 TTM EPS 備援機制)
 # ----------------------------------------------------
-import time
-import random
+import requests
 
 def analyze_stock_value(ticker_symbol: str) -> str:
     clean_ticker = ticker_symbol.strip().upper()
-    if not (clean_ticker.endswith(".TW") or clean_ticker.endswith(".TWO")):
-        full_ticker = f"{clean_ticker}.TW"
-    else:
-        full_ticker = clean_ticker
-
-    # 修正後的即時預估 EPS 基準（對應 2026 年最新財務爆發水準）
-    fallback_eps_map = {
-        "2330": 105.0,  # 修正為符合目前真實獲利水準的預估 EPS
-        "2317": 12.5,   # 鴻海
-        "2454": 60.0,   # 聯發科
-        "2881": 11.5,   # 富邦金
-        "2882": 10.0,   # 國泰金
-        "2891": 3.5,    # 中信金
-        "0050": None,   # ETF 不適用本益比
-        "0056": None,
-    }
-
+    
     try:
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Referer": "https://tw.stock.yahoo.com/"
-        })
-
-        # 隨機小睡 0.5~1.5 秒，降低被 Yahoo 判斷為機器人的機率
-        time.sleep(random.uniform(0.5, 1.5))
-
-        stock = yf.Ticker(full_ticker, session=session)
-        price_history = stock.history(period="5d")
+        # 1. 抓取證交所上市股票本益比與收盤價公開資料 (BWIBBU_ALL)
+        url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+        response = requests.get(url, timeout=10)
         
-        if price_history.empty:
-            full_ticker = f"{clean_ticker}.TWO"
-            stock = yf.Ticker(full_ticker, session=session)
-            price_history = stock.history(period="5d")
-            if price_history.empty:
-                return f"⚠️ 找不到股票代號 [{clean_ticker}] 的數據，請確認台股代號是否正確。"
+        stock_data = None
+        if response.status_code == 200:
+            all_stocks = response.json()
+            # 在清單中尋找對應的代號
+            for item in all_stocks:
+                if item.get("Code") == clean_ticker:
+                    stock_data = item
+                    break
         
-        current_price = round(price_history['Close'].iloc[-1], 2)
-        est_annual_eps = None
+        # 如果上市找不到，可以去櫃買中心(上櫃)找，這邊先以上市為例
+        if not stock_data:
+            return f"⚠️ 找不到股票代號 [{clean_ticker}] 的官方數據，請確認代號是否正確（目前支援上市股票）。"
+        
+        # 2. 從官方資料解析數據
+        # 證交所欄位名稱通常為：Code, Name, PE (本益比), Dividend, Yield 等
+        # 註：有些股票本益比為「發布不適用」或負數會顯示為 '-' 或 '-'
+        current_price = float(stock_data.get("ClosePrice", 0) or stock_data.get("MonthlyAveragePrice", 0))
+        pe_str = stock_data.get("PE", "").strip()
+        
+        if not pe_str or pe_str == "-" or pe_str == "0":
+            return f"⚠️ [{clean_ticker}] 目前本益比數據為負或不適用（無本益比資料），無法進行估價。"
+            
+        pe_ratio = float(pe_str)
+        
+        # 3. 自動反推 EPS (EPS = 股價 / 本益比)
+        est_annual_eps = round(current_price / pe_ratio, 2)
+        
+        if est_annual_eps <= 0:
+            return f"⚠️ [{clean_ticker}] 計算出的 EPS 異常，不適用本益比估價法。"
 
-        # 1. 嘗試從 info 或財報抓取
-        try:
-            info = stock.info
-            trailing_eps = info.get('trailingEps') or info.get('forwardEps')
-            if trailing_eps and trailing_eps > 0:
-                est_annual_eps = round(trailing_eps, 2)
-            else:
-                trailing_pe = info.get('trailingPE')
-                if trailing_pe and trailing_pe > 0:
-                    est_annual_eps = round(current_price / trailing_pe, 2)
-        except Exception:
-            pass
-
-        # 2. 如果 Yahoo 限流拿不到，且剛好在備用對照表內，直接使用備用 EPS
-        if (not est_annual_eps or est_annual_eps <= 0) and clean_ticker in fallback_eps_map:
-            est_annual_eps = fallback_eps_map[clean_ticker]
-
-        if not est_annual_eps or est_annual_eps <= 0:
-            return f"⚠️ [{clean_ticker}] 目前 Yahoo Finance 頻率限制中 (Rate Limited)，請稍候 1~2 分鐘後再查詢一次！"
-
-        # 設定歷史本益比基準乘數 (低 15x / 均 22x / 高 28x)
+        # 4. 設定歷史本益比基準乘數 (低 15x / 均 22x / 高 28x)
         low_pe = 15.0
         avg_pe = 22.0
         high_pe = 28.0
@@ -181,10 +155,10 @@ def analyze_stock_value(ticker_symbol: str) -> str:
             action_advice = "市場評價偏高，建議暫時觀望或避免追高。"
 
         report = (
-            f"📊 [{clean_ticker}] 智慧價值評估報告\n"
+            f"📊 [{clean_ticker}] 智慧價值評估報告 (官方數據)\n"
             f"---------------------------------\n"
-            f"💵 目前盤中/收盤價：{current_price} 元\n"
-            f"📈 預估/近四季 EPS：{est_annual_eps} 元\n\n"
+            f"💵 目前收盤/參考價：{current_price} 元\n"
+            f"📈 官方本益比換算 EPS：{est_annual_eps} 元\n\n"
             f"🚦 歷史本益比估價區間：\n"
             f"🟢 綠燈 (特價區)  ：{green_price} 元 ({low_pe}x PE)\n"
             f"🟡 黃燈 (合理區)  ：{yellow_price} 元 ({avg_pe}x PE)\n"
@@ -194,8 +168,9 @@ def analyze_stock_value(ticker_symbol: str) -> str:
             f"💡 建議：{action_advice}"
         )
         return report
+        
     except Exception as e:
-        return f"❌ 計算過程發生錯誤：Too Many Requests. 請稍候再試。"
+        return f"❌ 讀取證交所官方資料發生錯誤：{str(e)}"
 # ----------------------------------------------------
 # 文字訊息處理（支援「估價」指令與原本的飲食減脂教練）
 # ----------------------------------------------------
