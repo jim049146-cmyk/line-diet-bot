@@ -293,4 +293,146 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         yellow_price = round(est_annual_eps * avg_pe, 1)
         red_price = round(est_annual_eps * high_pe, 1)
         
-        status_light = "🟢 綠燈（特價區 / 安全邊際）" if current_price <= green_price else ("🟡 黃燈（合理區 / 定期定額）" if current_price <= yellow_price else "🔴 紅燈
+        if current_price <= green_price:
+            status_light = "🟢 綠燈（特價區 / 安全邊際）"
+            action_advice = "現價具備價值投資買點！"
+        elif current_price <= yellow_price:
+            status_light = "🟡 黃燈（合理區 / 定期定額）"
+            action_advice = "適合分批定期定額佈局。"
+        else:
+            status_light = "🔴 紅燈（昂貴區 / 居高思危）"
+            action_advice = "評價偏高，建議暫時觀望。"
+
+        return (
+            f"📊 [{clean_ticker}] 智慧價值評估報告\n"
+            f"---------------------------------\n"
+            f"💵 現價：{current_price} 元 | 參考 EPS：{est_annual_eps} 元\n"
+            f"🟢 特價區：{green_price} | 🟡 合理區：{yellow_price} | 🔴 昂貴區：{red_price}\n"
+            f"🎯 評級：{status_light}\n💡 建議：{action_advice}"
+        )
+    except Exception as e:
+        return f"❌ 計算錯誤：{str(e)}"
+
+def fallback_to_pb_valuation(stock, clean_ticker, current_price):
+    try:
+        url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+        response = requests.get(url, timeout=10)
+        pb_ratio = None
+        if response.status_code == 200:
+            for item in response.json():
+                if item.get("Code") == clean_ticker:
+                    for pb_key in ["PBratio", "PB", "PriceToBookRatio"]:
+                        pb_str = item.get(pb_key, "").strip()
+                        if pb_str and pb_str != "-" and pb_str != "0":
+                            try:
+                                pb_ratio = float(pb_str)
+                                break
+                            except ValueError:
+                                pass
+                    break
+        if pb_ratio and pb_ratio > 0:
+            if pb_ratio < 1.0:
+                pb_status = "🟢 綠燈（淨值以下）"
+            elif pb_ratio <= 1.3:
+                pb_status = "🟡 黃燈（合理區）"
+            else:
+                pb_status = "🔴 紅燈（相對高檔）"
+            return f"📊 [{clean_ticker}] P/B 評估\n💵 現價：{current_price} 元 | P/B：{pb_ratio} 倍\n🎯 評級：{pb_status}"
+    except Exception:
+        pass
+    return f"⚠️ [{clean_ticker}] 無法取得估價數據。"
+
+# ----------------------------------------------------
+# 文字訊息與指令處理
+# ----------------------------------------------------
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_text_message(event):
+    user_text = event.message.text.strip()
+    if not user_text:
+        return
+
+    dest_id = event.source.group_id if event.source.type == 'group' else (
+        event.source.room_id if hasattr(event.source, 'room_id') and event.source.room_id else event.source.user_id
+    )
+
+    # 1. 估價攔截
+    if user_text.startswith("估價"):
+        ticker = user_text.replace("估價", "").strip()
+        reply_text = "請輸入正確代號，例如：`估價2330`" if not ticker else analyze_stock_value(ticker)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 2. 紀錄歸屬攔截
+    record_match = re.search(r"(?:記錄在|記在)\s*([^\s的]+)\s*的\s*([^\s]+)", user_text)
+    if record_match:
+        user_name = record_match.group(1).strip()
+        meal_type = record_match.group(2).strip()
+        reply_text = confirm_and_save_log(dest_id, user_name, meal_type)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 3. 查詢總結攔截
+    summary_match = re.search(r"([^\s]+)\s*(?:今日總結|今天的總結)", user_text)
+    if summary_match:
+        user_name = summary_match.group(1).replace("查看", "").strip()
+        reply_text = get_daily_summary(user_name)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 4. 針對上一張照片或分析的補充備註
+    pending = get_pending_analysis(dest_id)
+    keywords = ["飲食", "減脂", "熱量", "能不能吃", "可以吃嗎", "幫我看", "飲控", "卡路里", "半碗", "去皮", "少飯", "微調"]
+    is_keyword_triggered = any(kw in user_text for kw in keywords)
+
+    if pending and (is_keyword_triggered or len(user_text) < 25) and not user_text.startswith("吃") and not user_text.startswith("喝"):
+        base_desc = pending[0]
+        combined_prompt = f"{SYSTEM_PROMPT}\n\n上一筆內容：{base_desc}\n使用者的最新補充備註：{user_text}\n請根據使用者的補充備註重新精算熱量與三大營養素。"
+        try:
+            response = call_gemini_with_retry(combined_prompt)
+            reply_text = response.text
+            desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
+            save_pending_analysis(dest_id, f"{base_desc} (備註: {user_text})", cal, p, c, f)
+            reply_text += "\n\n👉 已根據您的備註重新精算！確認後可直接輸入：`記錄在哲瑜的第一餐`"
+        except Exception:
+            reply_text = "⚠️ 重新精算時發生狀況，請再試一次！"
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 5. 一般文字飲食諮詢
+    if event.source.type != 'user' and not is_keyword_triggered and not "吃" in user_text and not "喝" in user_text:
+        return
+
+    full_prompt = f"{SYSTEM_PROMPT}\n\n使用者輸入的飲食內容：\n{user_text}"
+    try:
+        response = call_gemini_with_retry(full_prompt)
+        reply_text = response.text
+        
+        desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
+        save_pending_analysis(dest_id, desc, cal, p, c, f)
+        
+        reply_text += (
+            f"\n\n---------------------------------\n"
+            f"💡 **小提示**：確認這筆內容無誤後，可直接輸入："
+            f"`記錄在哲瑜的第一餐` 或 `記在哲瑜的午餐` 進行存檔！"
+        )
+    except Exception:
+        reply_text = "⚠️ 系統忙碌中，請稍後再試！"
+
+    reply_line(event.reply_token, reply_text)
+
+def reply_line(reply_token, text):
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=text)]
+            )
+        )
+
+# ----------------------------------------------------
+# 圖片訊息處理
+# ----------------------------------------------------
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image_message(event):
+    message_id = event.message
