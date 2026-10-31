@@ -165,7 +165,7 @@ def get_daily_summary(user_name):
         f"🥑 總脂肪：{round(total_f, 1)} g"
     )
 
-SYSTEM_PROMPT = "你是一個專業的飲食控制機器人。請針對使用者發送的食物照片或飲食文字（包含任何特殊備註，例如：飯吃半碗、去皮、醬汁減半等）進行精準估算。\n\n【強制輸出格式規範】：\n1. 🍱 估計餐點內容與熱量：\n   - 內容描述：簡述辨識出的食物與份量\n   - 熱量：XXX 大卡\n   - 三大營養素：蛋白質 XXg、碳水化合物 XXg、脂肪 XXg\n2. 🚦 飲控適合度評級：\n   - 🟢 綠燈 / 🟡 黃燈 / 🔴 紅燈（擇一並簡述理由）\n3. 💡 調整建議：給予 1~2 句具體的飲食微調建議。\n\n語氣請保持客觀、簡潔、實事求是，適合在社群群組內快速閱讀。"
+SYSTEM_PROMPT = "你是一個專業的飲食控制機器人。請針對使用者發送的食物照片或飲食文字進行精準估算。\n\n【強制輸出格式規範】：\n1. 🍱 估計餐點內容與熱量：\n   - 內容描述：簡述辨識出的食物與份量\n   - 熱量：XXX 大卡\n   - 三大營養素：蛋白質 XXg、碳水化合物 XXg、脂肪 XXg\n2. 🚦 飲控適合度評級：\n   - 🟢 綠燈 / 🟡 黃燈 / 🔴 紅燈\n3. 💡 調整建議：給予 1~2 句具體建議。"
 
 def parse_nutrition_from_text(text):
     calories, protein, carbs, fat = 0.0, 0.0, 0.0, 0.0
@@ -246,7 +246,6 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         
         current_price = round(price_history['Close'].iloc[-1], 2)
         est_annual_eps = None
-        eps_source_desc = "官方歷史本益比反推"
         
         try:
             q_fin = stock.quarterly_financials
@@ -261,7 +260,6 @@ def analyze_stock_value(ticker_symbol: str) -> str:
                     forward_run_rate_eps = round(recent_h1_eps * 2, 2)
                     if forward_run_rate_eps > 0:
                         est_annual_eps = forward_run_rate_eps
-                        eps_source_desc = f"最新財報動能年化 (H1累計 {round(recent_h1_eps, 2)}元 × 2)"
         except Exception:
             pass
 
@@ -275,7 +273,6 @@ def analyze_stock_value(ticker_symbol: str) -> str:
                         if pe_str and pe_str != "-" and pe_str != "0":
                             try:
                                 est_annual_eps = round(current_price / float(pe_str), 2)
-                                eps_source_desc = "官方歷史本益比反推 (備用)"
                             except ValueError:
                                 pass
                         break
@@ -375,7 +372,99 @@ def handle_text_message(event):
         return
 
     pending = get_pending_analysis(dest_id)
-    keywords = ["飲食", "減脂", "熱量", "能不能吃", "可以吃嗎", "幫我看", "飲控", "卡路里", "半碗", "去皮", "少飯", "微調"]
-    is_keyword_triggered = any(kw in user_text for kw in keywords)
+    if pending and len(user_text) < 30 and not user_text.startswith("吃") and not user_text.startswith("喝"):
+        base_desc = pending[0]
+        combined_prompt = f"{SYSTEM_PROMPT}\n\n上一筆內容：{base_desc}\n補充備註：{user_text}\n請根據補充備註重新精算熱量與三大營養素。"
+        try:
+            response = call_gemini_with_retry(combined_prompt)
+            reply_text = response.text
+            desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
+            save_pending_analysis(dest_id, f"{base_desc} (備註: {user_text})", cal, p, c, f)
+            reply_text += "\n\n👉 已重新精算！確認後可輸入：`記錄在哲瑜的第一餐`"
+        except Exception:
+            reply_text = "⚠️ 重新精算時發生狀況，請再試一次！"
+        reply_line(event.reply_token, reply_text)
+        return
 
-    if pending and (is_
+    if event.source.type != 'user' and "吃" not in user_text and "喝" not in user_text:
+        return
+
+    full_prompt = f"{SYSTEM_PROMPT}\n\n使用者輸入的飲食內容：\n{user_text}"
+    try:
+        response = call_gemini_with_retry(full_prompt)
+        reply_text = response.text
+        
+        desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
+        save_pending_analysis(dest_id, desc, cal, p, c, f)
+        
+        reply_text += (
+            f"\n\n---------------------------------\n"
+            f"💡 **小提示**：確認這筆內容無誤後，可直接輸入："
+            f"`記錄在哲瑜的第一餐` 或 `記在哲瑜的午餐` 進行存檔！"
+        )
+    except Exception:
+        reply_text = "⚠️ 系統忙碌中，請稍後再試！"
+
+    reply_line(event.reply_token, reply_text)
+
+def reply_line(reply_token, text):
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=text)]
+            )
+        )
+
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image_message(event):
+    message_id = event.message.id
+    reply_token = event.reply_token
+    dest_id = get_dest_id(event)
+
+    print(f"📥 收到圖片事件，Message ID: {message_id}, Dest ID: {dest_id}")
+    reply_line(reply_token, "📸 收到餐點照片！飲食控制機器人正在精算中，請稍候... ⏳")
+    threading.Thread(target=process_image_in_background, args=(message_id, dest_id)).start()
+
+def process_image_in_background(message_id, dest_id):
+    try:
+        print("🔄 開始背景處理圖片...")
+        with ApiClient(configuration) as api_client:
+            line_bot_blob_api = MessagingApiBlob(api_client)
+            image_bytes = line_bot_blob_api.get_message_content(message_id)
+
+        print(f"✅ 成功下載圖片，大小: {len(image_bytes)} bytes")
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
+
+        response = call_gemini_with_retry([SYSTEM_PROMPT, image_part])
+        reply_text = response.text
+        print("✅ Gemini 分析完成")
+
+        desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
+        save_pending_analysis(dest_id, desc, cal, p, c, f)
+
+        reply_text += (
+            f"\n\n---------------------------------\n"
+            f"💡 **小提示**：如果這餐有特殊吃法（例如：*白飯吃半碗、雞腿去皮*），"
+            f"可以直接打字告訴我幫你重新精算！\n"
+            f"確認無誤後，可直接輸入：`記錄在哲瑜的第一餐`"
+        )
+
+    except Exception as e:
+        print("❌ 背景處理圖片發生錯誤:", traceback.format_exc())
+        reply_text = "⚠️ 圖片分析時發生了一點狀況，請稍後再傳一次照片即可！"
+
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.push_message(
+            PushMessageRequest(
+                to=dest_id,
+                messages=[TextMessage(text=reply_text)]
+            )
+        )
+    print("📤 推播分析結果成功！")
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
