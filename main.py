@@ -342,7 +342,6 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         session.headers.update({"User-Agent": "Mozilla/5.0"})
         stock = yf.Ticker(full_ticker, session=session)
         
-        # 抓取 3 個月歷史 K 線資料做技術分析
         hist = stock.history(period="3mo")
         if hist.empty:
             full_ticker = f"{clean_ticker}.TWO"
@@ -353,7 +352,6 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         
         current_price = round(hist['Close'].iloc[-1], 2)
         
-        # --- 1. 技術面 (K線與均線) 分析 ---
         closes = hist['Close']
         ma20 = round(closes.rolling(window=20).mean().iloc[-1], 2) if len(closes) >= 20 else current_price
         ma60 = round(closes.rolling(window=60).mean().iloc[-1], 2) if len(closes) >= 60 else ma20
@@ -371,7 +369,6 @@ def analyze_stock_value(ticker_symbol: str) -> str:
             tech_status = "🟡 技術面：盤整打底中"
             tech_advice = "均線糾結，無明顯單邊趨勢，建議觀望突破方向或分批小量佈局。"
 
-        # --- 2. 基本面 (EPS / 估值三色燈號) 分析 ---
         est_annual_eps = None
         try:
             q_fin = stock.quarterly_financials
@@ -540,22 +537,28 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
-    # 6. 飲食微調指令（依據個人暫存）
+    # 6. 飲食內容更正指令（支援透過「更正」關鍵字對上一張照片內容進行修正）
     pending = get_pending_analysis(user_id)
-    modify_keywords = ["半碗", "去皮", "少飯", "微調", "改為", "換成", "不加", "少醬", "備註"]
+    modify_keywords = ["更正", "修正", "改為", "換成", "備註", "補充"]
     is_modify = any(kw in user_text for kw in modify_keywords)
 
     if pending and is_modify:
         base_desc = pending[0]
-        combined_prompt = f"{SYSTEM_PROMPT}\n\n上一筆內容：{base_desc}\n補充備註：{user_text}\n請根據補充備註重新精算熱量與三大營養素。"
+        combined_prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"【學員更正/補充說明】：\n"
+            f"原本照片辨識內容為：{base_desc}\n"
+            f"學員輸入的實際更正內容為：{user_text}\n\n"
+            f"請以學員提供的更正內容為主，重新估算精確的熱量與三大營養素。"
+        )
         try:
             response = call_gemini_with_retry(combined_prompt)
             reply_text = response.text
             desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
-            save_pending_analysis(user_id, f"{base_desc} (備註: {user_text})", cal, p, c, f)
-            reply_text += "\n\n👉 已重新精算！確認後可輸入：`記錄在哲瑜的第一餐`"
+            save_pending_analysis(user_id, desc, cal, p, c, f)
+            reply_text += "\n\n👉 已成功為你更正餐點內容！確認後可直接輸入：`記錄在哲瑜的第一餐`"
         except Exception as e:
-            reply_text = f"⚠️ 重新精算發生錯誤: {str(e)}"
+            reply_text = f"⚠️ 更正重新精算發生錯誤: {str(e)}"
         reply_line(event.reply_token, reply_text)
         return
 
@@ -619,8 +622,8 @@ def handle_image_message(event):
 
         reply_text += (
             f"\n\n---------------------------------\n"
-            f"💡 **小提示**：如果這餐有特殊吃法（例如：*白飯吃半碗、雞腿去皮*），"
-            f"可以直接打字告訴我幫你重新精算！\n"
+            f"💡 **小提示**：如果照片辨識內容有誤，"
+            f"可以直接打字加上「更正」來告訴我真實內容（例如：`更正 清燉帶皮羊肉湯4塊肉...`）！\n"
             f"確認無誤後，可直接輸入：`記錄在哲瑜的第一餐`"
         )
 
