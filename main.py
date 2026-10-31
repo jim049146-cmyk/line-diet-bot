@@ -3,7 +3,6 @@ import io
 import re
 import sqlite3
 import traceback
-import threading
 import requests
 from datetime import datetime
 from flask import Flask, request, abort
@@ -21,7 +20,6 @@ from linebot.v3.messaging import (
     MessagingApi,
     MessagingApiBlob,
     ReplyMessageRequest,
-    PushMessageRequest,
     TextMessage
 )
 from linebot.v3.webhooks import (
@@ -221,13 +219,12 @@ def get_daily_summary(user_name, user_id):
     # 計算運動消耗總計
     total_workout_cal = sum(r[1] for r in workout_rows)
     
-    profile_text = "👤 尚未設定身體數據（可輸入：`設定 身高175 體重70 體脂18 目標減脂`）"
-    tdee = 2000 # 預設值
+    profile_text = "👤 尚未設定身體數據（可輸入：`設定 哲瑜 身高 175 體重 70 體脂 18 目標 減脂`）"
+    tdee = 2000
     if profile_row:
         h, w, bf, goal = profile_row
-        # 簡易估算 BMR (Mifflin-St Jeor 簡化男女平均) 與 TDEE
-        bmr = 10 * w + 6.25 * h - 5 * 34 + 5 # 假設年齡 34
-        tdee = bmr * 1.375 # 輕度活動量
+        bmr = 10 * w + 6.25 * h - 5 * 34 + 5
+        tdee = bmr * 1.375
         profile_text = f"👤 身高：{h}cm | 體重：{w}kg | 體脂：{bf}% | 目標：{goal}\n🔥 估算基礎代謝 (BMR)：{int(bmr)} kcal | 總消耗 (TDEE)：{int(tdee)} kcal"
     
     food_detail = ""
@@ -426,14 +423,6 @@ def fallback_to_pb_valuation(stock, clean_ticker, current_price):
         pass
     return f"⚠️ [{clean_ticker}] 無法取得估價數據。"
 
-def get_dest_id(event):
-    if event.source.type == 'group':
-        return event.source.group_id
-    elif event.source.type == 'room':
-        return event.source.room_id
-    else:
-        return event.source.user_id
-
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
@@ -450,7 +439,7 @@ def handle_text_message(event):
         return
 
     # 2. 設定個人身體數據指令：設定 哲瑜 身高 175 體重 70 體脂 18 目標 減脂
-    profile_match = re.search(r"設定\s*([^\s]+)\s*身高\s*(\d+(?.\d+)?)\s*體重\s*(\d+(?.\d+)?)\s*體脂\s*(\d+(?.\d+)?)\s*目標\s*([^\s]+)", user_text)
+    profile_match = re.search(r"設定\s*([^\s]+)\s*身高\s*(\d+(?:\.\d+)?)\s*體重\s*(\d+(?:\.\d+)?)\s*體脂\s*(\d+(?:\.\d+)?)\s*目標\s*([^\s]+)", user_text)
     if profile_match:
         user_name = profile_match.group(1).strip()
         h = float(profile_match.group(2))
@@ -467,7 +456,6 @@ def handle_text_message(event):
         user_name = workout_match.group(1).strip()
         workout_desc = workout_match.group(2).strip()
         
-        # 透過 Gemini 快速估算運動消耗熱量
         try:
             w_prompt = f"請評估以下運動內容大約消耗多少大卡（以一般成人體重估算），只要回傳一個數字（例如：350）：\n{workout_desc}"
             w_res = call_gemini_with_retry(w_prompt)
@@ -552,30 +540,24 @@ def reply_line(reply_token, text):
             )
         )
 
+# 📸 圖片事件處理（已改為同步 Reply，完全不消耗 Push 額度）
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     message_id = event.message.id
     reply_token = event.reply_token
     user_id = event.source.user_id
-    dest_id = get_dest_id(event)
 
     print(f"📥 收到圖片事件，Message ID: {message_id}, User ID: {user_id}")
-    reply_line(reply_token, "📸 收到餐點照片！飲食控制機器人正在精算中，請稍候... ⏳")
-    threading.Thread(target=process_image_in_background, args=(message_id, user_id, dest_id)).start()
 
-def process_image_in_background(message_id, user_id, dest_id):
     try:
-        print("🔄 開始背景處理圖片...")
         with ApiClient(configuration) as api_client:
             line_bot_blob_api = MessagingApiBlob(api_client)
             image_bytes = line_bot_blob_api.get_message_content(message_id)
 
-        print(f"✅ 成功下載圖片，大小: {len(image_bytes)} bytes")
         image_part = types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
 
         response = call_gemini_with_retry([SYSTEM_PROMPT, image_part])
         reply_text = response.text
-        print("✅ Gemini 分析完成")
 
         desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
         save_pending_analysis(user_id, desc, cal, p, c, f)
@@ -588,18 +570,10 @@ def process_image_in_background(message_id, user_id, dest_id):
         )
 
     except Exception as e:
-        print("❌ 背景處理圖片發生錯誤:", traceback.format_exc())
-        reply_text = "⚠️ 圖片分析時發生了一點狀況，請稍後再傳一次照片即可！"
+        print("❌ 圖片處理發生錯誤:", traceback.format_exc())
+        reply_text = f"⚠️ 圖片分析時發生了一點狀況，請稍後再試一次！"
 
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.push_message(
-            PushMessageRequest(
-                to=dest_id,
-                messages=[TextMessage(text=reply_text)]
-            )
-        )
-    print("📤 推播分析結果成功！")
+    reply_line(reply_token, reply_text)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
