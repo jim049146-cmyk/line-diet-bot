@@ -371,8 +371,12 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
+    # 1. 檢查是否有暫存紀錄需要微調
     pending = get_pending_analysis(dest_id)
-    if pending and len(user_text) < 30 and not user_text.startswith("吃") and not user_text.startswith("喝"):
+    modify_keywords = ["半碗", "去皮", "少飯", "微調", "改為", "換成", "不加", "少醬", "備註"]
+    is_modify = any(kw in user_text for kw in modify_keywords)
+
+    if pending and is_modify:
         base_desc = pending[0]
         combined_prompt = f"{SYSTEM_PROMPT}\n\n上一筆內容：{base_desc}\n補充備註：{user_text}\n請根據補充備註重新精算熱量與三大營養素。"
         try:
@@ -381,14 +385,19 @@ def handle_text_message(event):
             desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
             save_pending_analysis(dest_id, f"{base_desc} (備註: {user_text})", cal, p, c, f)
             reply_text += "\n\n👉 已重新精算！確認後可輸入：`記錄在哲瑜的第一餐`"
-        except Exception:
-            reply_text = "⚠️ 重新精算時發生狀況，請再試一次！"
+        except Exception as e:
+            reply_text = f"⚠️ 重新精算發生錯誤: {str(e)}"
         reply_line(event.reply_token, reply_text)
         return
 
-    if event.source.type != 'user' and "吃" not in user_text and "喝" not in user_text:
+    # 2. 廣泛食物關鍵字過濾（解決像蛋白粉、橘子被漏掉的問題）
+    food_keywords = ["吃", "喝", "蛋白粉", "蛋白飲", "橘子", "餐", "雞肉", "便當", "飯", "麵", "奶昔", "沙拉", "蛋", "燕麥", "水果", "高培", "乳清", "微克", "卡路里"]
+    is_food_related = any(kw in user_text for kw in food_keywords)
+
+    if event.source.type != 'user' and not is_food_related:
         return
 
+    # 3. 正常計算全新飲食內容
     full_prompt = f"{SYSTEM_PROMPT}\n\n使用者輸入的飲食內容：\n{user_text}"
     try:
         response = call_gemini_with_retry(full_prompt)
@@ -400,10 +409,10 @@ def handle_text_message(event):
         reply_text += (
             f"\n\n---------------------------------\n"
             f"💡 **小提示**：確認這筆內容無誤後，可直接輸入："
-            f"`記錄在哲瑜的第一餐` 或 `記在哲瑜的午餐` 進行存檔！"
+            f"`記錄在哲瑜的第一餐` 或 `記在哲瑜的點心` 進行存檔！"
         )
-    except Exception:
-        reply_text = "⚠️ 系統忙碌中，請稍後再試！"
+    except Exception as e:
+        reply_text = f"⚠️ 系統錯誤: {str(e)}"
 
     reply_line(event.reply_token, reply_text)
 
