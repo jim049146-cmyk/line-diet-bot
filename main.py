@@ -337,11 +337,45 @@ def fallback_to_pb_valuation(stock, clean_ticker, current_price):
         pass
     return f"⚠️ [{clean_ticker}] 無法取得估價數據。"
 
+def get_dest_id(event):
+    if event.source.type == 'group':
+        return event.source.group_id
+    elif event.source.type == 'room':
+        return event.source.room_id
+    else:
+        return event.source.user_id
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
     if not user_text:
         return
 
-    dest_id = event.source.group_id if event.source.type == 'group' else (
-        event.source.
+    dest_id = get_dest_id(event)
+
+    if user_text.startswith("估價"):
+        ticker = user_text.replace("估價", "").strip()
+        reply_text = "請輸入正確代號，例如：`估價2330`" if not ticker else analyze_stock_value(ticker)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    record_match = re.search(r"(?:記錄在|記在)\s*([^\s的]+)\s*的\s*([^\s]+)", user_text)
+    if record_match:
+        user_name = record_match.group(1).strip()
+        meal_type = record_match.group(2).strip()
+        reply_text = confirm_and_save_log(dest_id, user_name, meal_type)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    summary_match = re.search(r"([^\s]+)\s*(?:今日總結|今天的總結)", user_text)
+    if summary_match:
+        user_name = summary_match.group(1).replace("查看", "").strip()
+        reply_text = get_daily_summary(user_name)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    pending = get_pending_analysis(dest_id)
+    keywords = ["飲食", "減脂", "熱量", "能不能吃", "可以吃嗎", "幫我看", "飲控", "卡路里", "半碗", "去皮", "少飯", "微調"]
+    is_keyword_triggered = any(kw in user_text for kw in keywords)
+
+    if pending and (is_
