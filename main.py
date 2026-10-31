@@ -167,14 +167,130 @@ def get_daily_summary(user_name):
 # ----------------------------------------------------
 # 系統 AI 提示詞
 # ----------------------------------------------------
-SYSTEM_PROMPT = """
-你是一個專業的飲食控制機器人。
-請針對使用者發送的食物照片或飲食文字（包含任何特殊備註，例如：飯吃半碗、去皮、醬汁減半等）進行精準估算。
+SYSTEM_PROMPT = "你是一個專業的飲食控制機器人。請針對使用者發送的食物照片或飲食文字（包含任何特殊備註，例如：飯吃半碗、去皮、醬汁減半等）進行精準估算。\n\n【強制輸出格式規範】：\n1. 🍱 估計餐點內容與熱量：\n   - 內容描述：簡述辨識出的食物與份量\n   - 熱量：XXX 大卡\n   - 三大營養素：蛋白質 XXg、碳水化合物 XXg、脂肪 XXg\n2. 🚦 飲控適合度評級：\n   - 🟢 綠燈 / 🟡 黃燈 / 🔴 紅燈（擇一並簡述理由）\n3. 💡 調整建議：給予 1~2 句具體的飲食微調建議。\n\n語氣請保持客觀、簡潔、實事求是，適合在社群群組內快速閱讀。"
 
-⚠️ **強制輸出格式規範**（請務必明確列出以下數據，絕不可省略）：
-1. 🍱 估計餐點內容與熱量：
-   - 內容描述：簡述辨識出的食物與份量
-   - 熱量：XXX 大卡
-   - 三大營養素：蛋白質 XXg、碳水化合物 XXg、脂肪 XXg
-2. 🚦 飲控適合度評級：
-   - 🟢 綠燈 / 🟡 黃燈 /
+def parse_nutrition_from_text(text):
+    calories, protein, carbs, fat = 0.0, 0.0, 0.0, 0.0
+    description = "健康餐點"
+    
+    desc_match = re.search(r"(?:內容描述|內容與熱量)：\s*([^\n]+)", text)
+    if desc_match:
+        description = desc_match.group(1).strip()
+    else:
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        if lines:
+            description = lines[0][:30]
+    
+    cal_match = re.search(r"(\d+)\s*大卡", text)
+    if cal_match:
+        calories = float(cal_match.group(1))
+        
+    p_match = re.search(r"蛋白質\s*(\d+(\.\d+)?)g", text)
+    if p_match:
+        protein = float(p_match.group(1))
+        
+    c_match = re.search(r"碳水化合物?\s*(\d+(\.\d+)?)g", text)
+    if c_match:
+        carbs = float(c_match.group(1))
+        
+    f_match = re.search(r"脂肪\s*(\d+(\.\d+)?)g", text)
+    if f_match:
+        fat = float(f_match.group(1))
+        
+    return description, calories, protein, carbs, fat
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((google.genai.errors.ServerError, Exception)),
+    reraise=True
+)
+def call_gemini_with_retry(contents):
+    return client.models.generate_content(
+        model=MODEL_ID,
+        contents=contents
+    )
+
+@app.route("/health", methods=['GET'])
+def health_check():
+    return "Bot is alive and healthy!", 200
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return 'OK'
+
+@app.route("/")
+def home():
+    return "Diet & Stock Bot is running!"
+
+# ----------------------------------------------------
+# 股市模組
+# ----------------------------------------------------
+def analyze_stock_value(ticker_symbol: str) -> str:
+    clean_ticker = ticker_symbol.strip().upper()
+    full_ticker = clean_ticker if (clean_ticker.endswith(".TW") or clean_ticker.endswith(".TWO")) else f"{clean_ticker}.TW"
+
+    try:
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
+        stock = yf.Ticker(full_ticker, session=session)
+        
+        price_history = stock.history(period="1d")
+        if price_history.empty:
+            full_ticker = f"{clean_ticker}.TWO"
+            stock = yf.Ticker(full_ticker, session=session)
+            price_history = stock.history(period="1d")
+            if price_history.empty:
+                return f"⚠️ 找不到股票代號 [{clean_ticker}] 的股價數據。"
+        
+        current_price = round(price_history['Close'].iloc[-1], 2)
+        est_annual_eps = None
+        eps_source_desc = "官方歷史本益比反推"
+        
+        try:
+            q_fin = stock.quarterly_financials
+            if not q_fin.empty:
+                eps_row = None
+                for name in ['Basic EPS', 'Diluted EPS', 'Basic Earnings Per Share']:
+                    if name in q_fin.index:
+                        eps_row = q_fin.loc[name].dropna()
+                        break
+                if eps_row is not None and len(eps_row) >= 2:
+                    recent_h1_eps = eps_row.iloc[:2].sum()
+                    forward_run_rate_eps = round(recent_h1_eps * 2, 2)
+                    if forward_run_rate_eps > 0:
+                        est_annual_eps = forward_run_rate_eps
+                        eps_source_desc = f"最新財報動能年化 (H1累計 {round(recent_h1_eps, 2)}元 × 2)"
+        except Exception:
+            pass
+
+        if not est_annual_eps or est_annual_eps <= 0:
+            url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                for item in response.json():
+                    if item.get("Code") == clean_ticker:
+                        pe_str = item.get("PEratio", "").strip()
+                        if pe_str and pe_str != "-" and pe_str != "0":
+                            try:
+                                est_annual_eps = round(current_price / float(pe_str), 2)
+                                eps_source_desc = "官方歷史本益比反推 (備用)"
+                            except ValueError:
+                                pass
+                        break
+
+        if not est_annual_eps or est_annual_eps <= 0:
+            return fallback_to_pb_valuation(stock, clean_ticker, current_price)
+
+        low_pe, avg_pe, high_pe = 15.0, 22.0, 28.0
+        green_price = round(est_annual_eps * low_pe, 1)
+        yellow_price = round(est_annual_eps * avg_pe, 1)
+        red_price = round(est_annual_eps * high_pe, 1)
+        
+        status_light = "🟢 綠燈（特價區 / 安全邊際）" if current_price <= green_price else ("🟡 黃燈（合理區 / 定期定額）" if current_price <= yellow_price else "🔴 紅燈
