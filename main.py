@@ -284,4 +284,4 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         except Exception:
             pass
 
-        if not est_annual_eps or est_annual_eps
+        if not est_annual_eps or est_annual_eps <= 0:
