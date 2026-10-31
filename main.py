@@ -218,14 +218,17 @@ def get_daily_summary(user_name, user_id):
     
     # 計算運動消耗總計
     total_workout_cal = sum(r[1] for r in workout_rows)
+    net_calories = total_cal - total_workout_cal
     
     profile_text = "👤 尚未設定身體數據（可輸入：`設定 哲瑜 身高 175 體重 70 體脂 18 目標 減脂`）"
-    tdee = 2000
+    tdee = 2100
+    bmr = 1500
+    goal = "維持"
     if profile_row:
         h, w, bf, goal = profile_row
         bmr = 10 * w + 6.25 * h - 5 * 34 + 5
         tdee = bmr * 1.375
-        profile_text = f"👤 身高：{h}cm | 體重：{w}kg | 體脂：{bf}% | 目標：{goal}\n🔥 估算基礎代謝 (BMR)：{int(bmr)} kcal | 總消耗 (TDEE)：{int(tdee)} kcal"
+        profile_text = f"👤 身高：{h}cm | 體重：{w}kg | 體脂：{bf}% | 目標：{goal}\n🔥 基礎代謝 (BMR)：{int(bmr)} kcal | 總消耗 (TDEE)：{int(tdee)} kcal"
     
     food_detail = ""
     for r in food_rows:
@@ -234,8 +237,24 @@ def get_daily_summary(user_name, user_id):
     workout_detail = ""
     for r in workout_rows:
         workout_detail += f"🏃 {r[0]} (消耗約 -{r[1]} kcal)\n"
-        
-    net_calories = total_cal - total_workout_cal
+
+    # 🤖 呼叫 Gemini 產生專業教練總結講評
+    coach_comment = "表現不錯，繼續保持！"
+    try:
+        comment_prompt = (
+            f"你是一位專業且嚴格的AI健身教練。請根據以下學員今日的數據，給予一段 3~4 句具體、專業且帶有鼓勵性質的總結講評（包含赤字是否理想、蛋白質是否達標、飲食內容的調整建議）：\n"
+            f"- 學員目標：{goal}\n"
+            f"- 估算 TDEE：{int(tdee)} kcal\n"
+            f"- 今日總攝取熱量：{total_cal} kcal\n"
+            f"- 運動總消耗：{total_workout_cal} kcal\n"
+            f"- 淨熱量：{net_calories} kcal (熱量赤字：{int(tdee - net_calories)} kcal)\n"
+            f"- 蛋白質攝取：{total_p}g\n"
+            f"請直接給出講評文字，語氣要專業、激勵。"
+        )
+        res = call_gemini_with_retry(comment_prompt)
+        coach_comment = res.text.strip()
+    except Exception:
+        pass
     
     return (
         f"📊 [{user_name}] {today} 綜合健康與熱量報告\n"
@@ -251,7 +270,8 @@ def get_daily_summary(user_name, user_id):
         f"• 攝取總熱量：{round(total_cal, 1)} kcal\n"
         f"• 蛋白質：{round(total_p, 1)}g | 碳水：{round(total_c, 1)}g | 脂肪：{round(total_f, 1)}g\n"
         f"• 淨熱量 (攝取 - 消耗)：{round(net_calories, 1)} kcal\n"
-        f"💡 建議對照 TDEE 評估今日熱量赤字/盈餘狀態！"
+        f"---------------------------------\n"
+        f"💡 **教練總結講評**：\n{coach_comment}"
     )
 
 SYSTEM_PROMPT = "你是一個專業的飲食控制與健身教練機器人。請針對使用者發送的食物照片或飲食文字進行精準估算。\n\n【強制輸出格式規範】：\n1. 🍱 估計餐點內容與熱量：\n   - 內容描述：簡述辨識出的食物與份量\n   - 熱量：XXX 大卡\n   - 三大營養素：蛋白質 XXg、碳水化合物 XXg、脂肪 XXg\n2. 🚦 飲控適合度評級：\n   - 🟢 綠燈 / 🟡 黃燈 / 🔴 紅燈\n3. 💡 調整建議：給予 1~2 句具體建議。"
@@ -540,7 +560,7 @@ def reply_line(reply_token, text):
             )
         )
 
-# 📸 圖片事件處理（已改為同步 Reply，完全不消耗 Push 額度）
+# 📸 圖片事件處理（同步 Reply，不耗 Push 額度）
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     message_id = event.message.id
