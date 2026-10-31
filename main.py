@@ -2,6 +2,7 @@ import os
 import io
 import re
 import sqlite3
+import traceback
 import threading
 import requests
 from datetime import datetime
@@ -164,9 +165,6 @@ def get_daily_summary(user_name):
         f"🥑 總脂肪：{round(total_f, 1)} g"
     )
 
-# ----------------------------------------------------
-# 系統 AI 提示詞
-# ----------------------------------------------------
 SYSTEM_PROMPT = "你是一個專業的飲食控制機器人。請針對使用者發送的食物照片或飲食文字（包含任何特殊備註，例如：飯吃半碗、去皮、醬汁減半等）進行精準估算。\n\n【強制輸出格式規範】：\n1. 🍱 估計餐點內容與熱量：\n   - 內容描述：簡述辨識出的食物與份量\n   - 熱量：XXX 大卡\n   - 三大營養素：蛋白質 XXg、碳水化合物 XXg、脂肪 XXg\n2. 🚦 飲控適合度評級：\n   - 🟢 綠燈 / 🟡 黃燈 / 🔴 紅燈（擇一並簡述理由）\n3. 💡 調整建議：給予 1~2 句具體的飲食微調建議。\n\n語氣請保持客觀、簡潔、實事求是，適合在社群群組內快速閱讀。"
 
 def parse_nutrition_from_text(text):
@@ -229,9 +227,6 @@ def callback():
 def home():
     return "Diet & Stock Bot is running!"
 
-# ----------------------------------------------------
-# 股市模組
-# ----------------------------------------------------
 def analyze_stock_value(ticker_symbol: str) -> str:
     clean_ticker = ticker_symbol.strip().upper()
     full_ticker = clean_ticker if (clean_ticker.endswith(".TW") or clean_ticker.endswith(".TWO")) else f"{clean_ticker}.TW"
@@ -342,9 +337,6 @@ def fallback_to_pb_valuation(stock, clean_ticker, current_price):
         pass
     return f"⚠️ [{clean_ticker}] 無法取得估價數據。"
 
-# ----------------------------------------------------
-# 文字訊息與指令處理
-# ----------------------------------------------------
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
@@ -352,87 +344,4 @@ def handle_text_message(event):
         return
 
     dest_id = event.source.group_id if event.source.type == 'group' else (
-        event.source.room_id if hasattr(event.source, 'room_id') and event.source.room_id else event.source.user_id
-    )
-
-    # 1. 估價攔截
-    if user_text.startswith("估價"):
-        ticker = user_text.replace("估價", "").strip()
-        reply_text = "請輸入正確代號，例如：`估價2330`" if not ticker else analyze_stock_value(ticker)
-        reply_line(event.reply_token, reply_text)
-        return
-
-    # 2. 紀錄歸屬攔截
-    record_match = re.search(r"(?:記錄在|記在)\s*([^\s的]+)\s*的\s*([^\s]+)", user_text)
-    if record_match:
-        user_name = record_match.group(1).strip()
-        meal_type = record_match.group(2).strip()
-        reply_text = confirm_and_save_log(dest_id, user_name, meal_type)
-        reply_line(event.reply_token, reply_text)
-        return
-
-    # 3. 查詢總結攔截
-    summary_match = re.search(r"([^\s]+)\s*(?:今日總結|今天的總結)", user_text)
-    if summary_match:
-        user_name = summary_match.group(1).replace("查看", "").strip()
-        reply_text = get_daily_summary(user_name)
-        reply_line(event.reply_token, reply_text)
-        return
-
-    # 4. 針對上一張照片或分析的補充備註
-    pending = get_pending_analysis(dest_id)
-    keywords = ["飲食", "減脂", "熱量", "能不能吃", "可以吃嗎", "幫我看", "飲控", "卡路里", "半碗", "去皮", "少飯", "微調"]
-    is_keyword_triggered = any(kw in user_text for kw in keywords)
-
-    if pending and (is_keyword_triggered or len(user_text) < 25) and not user_text.startswith("吃") and not user_text.startswith("喝"):
-        base_desc = pending[0]
-        combined_prompt = f"{SYSTEM_PROMPT}\n\n上一筆內容：{base_desc}\n使用者的最新補充備註：{user_text}\n請根據使用者的補充備註重新精算熱量與三大營養素。"
-        try:
-            response = call_gemini_with_retry(combined_prompt)
-            reply_text = response.text
-            desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
-            save_pending_analysis(dest_id, f"{base_desc} (備註: {user_text})", cal, p, c, f)
-            reply_text += "\n\n👉 已根據您的備註重新精算！確認後可直接輸入：`記錄在哲瑜的第一餐`"
-        except Exception:
-            reply_text = "⚠️ 重新精算時發生狀況，請再試一次！"
-        reply_line(event.reply_token, reply_text)
-        return
-
-    # 5. 一般文字飲食諮詢
-    if event.source.type != 'user' and not is_keyword_triggered and not "吃" in user_text and not "喝" in user_text:
-        return
-
-    full_prompt = f"{SYSTEM_PROMPT}\n\n使用者輸入的飲食內容：\n{user_text}"
-    try:
-        response = call_gemini_with_retry(full_prompt)
-        reply_text = response.text
-        
-        desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
-        save_pending_analysis(dest_id, desc, cal, p, c, f)
-        
-        reply_text += (
-            f"\n\n---------------------------------\n"
-            f"💡 **小提示**：確認這筆內容無誤後，可直接輸入："
-            f"`記錄在哲瑜的第一餐` 或 `記在哲瑜的午餐` 進行存檔！"
-        )
-    except Exception:
-        reply_text = "⚠️ 系統忙碌中，請稍後再試！"
-
-    reply_line(event.reply_token, reply_text)
-
-def reply_line(reply_token, text):
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[TextMessage(text=text)]
-            )
-        )
-
-# ----------------------------------------------------
-# 圖片訊息處理
-# ----------------------------------------------------
-@handler.add(MessageEvent, message=ImageMessageContent)
-def handle_image_message(event):
-    message_id = event.message
+        event.source.
