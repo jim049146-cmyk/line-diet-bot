@@ -165,7 +165,7 @@ def get_daily_summary(user_name):
     )
 
 # ----------------------------------------------------
-# 系統 AI 提示詞（規範機器人身份與強制營養素輸出格式）
+# 系統 AI 提示詞
 # ----------------------------------------------------
 SYSTEM_PROMPT = """
 你是一個專業的飲食控制機器人。
@@ -244,7 +244,7 @@ def home():
     return "Diet & Stock Bot is running!"
 
 # ----------------------------------------------------
-# 股市模組保持不變
+# 股市模組
 # ----------------------------------------------------
 def analyze_stock_value(ticker_symbol: str) -> str:
     clean_ticker = ticker_symbol.strip().upper()
@@ -263,25 +263,4 @@ def analyze_stock_value(ticker_symbol: str) -> str:
             if price_history.empty:
                 return f"⚠️ 找不到股票代號 [{clean_ticker}] 的股價數據。"
         
-        current_price = round(price_history['Close'].iloc[-1], 2)
-        est_annual_eps = None
-        eps_source_desc = "官方歷史本益比反推"
-        
-        try:
-            q_fin = stock.quarterly_financials
-            if not q_fin.empty:
-                eps_row = None
-                for name in ['Basic EPS', 'Diluted EPS', 'Basic Earnings Per Share']:
-                    if name in q_fin.index:
-                        eps_row = q_fin.loc[name].dropna()
-                        break
-                if eps_row is not None and len(eps_row) >= 2:
-                    recent_h1_eps = eps_row.iloc[:2].sum()
-                    forward_run_rate_eps = round(recent_h1_eps * 2, 2)
-                    if forward_run_rate_eps > 0:
-                        est_annual_eps = forward_run_rate_eps
-                        eps_source_desc = f"最新財報動能年化 (H1累計 {round(recent_h1_eps, 2)}元 × 2)"
-        except Exception:
-            pass
-
-        if not est_annual_eps or est_annual_eps <= 0:
+        current_price = round(price_history
