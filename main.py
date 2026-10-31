@@ -48,7 +48,7 @@ configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ----------------------------------------------------
-# 🗄️ SQLite 資料庫模組
+# 🗄️ SQLite 資料庫模組（支援多人獨立暫存）
 # ----------------------------------------------------
 DB_FILE = "health_logs.db"
 
@@ -68,9 +68,10 @@ def init_db():
             fat REAL
         )
     ''')
+    # 💡 關鍵修改：將 PRIMARY KEY 改為 user_id，確保群組多人使用時，各自的暫存互不干擾、不會被覆蓋
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS pending_logs (
-            dest_id TEXT PRIMARY KEY,
+            user_id TEXT PRIMARY KEY,
             description TEXT,
             calories REAL,
             protein REAL,
@@ -84,29 +85,29 @@ def init_db():
 
 init_db()
 
-def save_pending_analysis(dest_id, description, calories, protein, carbs, fat):
+def save_pending_analysis(user_id, description, calories, protein, carbs, fat):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
-        INSERT OR REPLACE INTO pending_logs (dest_id, description, calories, protein, carbs, fat, created_at)
+        INSERT OR REPLACE INTO pending_logs (user_id, description, calories, protein, carbs, fat, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (dest_id, description, calories, protein, carbs, fat, now_str))
+    ''', (user_id, description, calories, protein, carbs, fat, now_str))
     conn.commit()
     conn.close()
 
-def get_pending_analysis(dest_id):
+def get_pending_analysis(user_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('SELECT description, calories, protein, carbs, fat FROM pending_logs WHERE dest_id = ?', (dest_id,))
+    cursor.execute('SELECT description, calories, protein, carbs, fat FROM pending_logs WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
     conn.close()
     return row
 
-def confirm_and_save_log(dest_id, user_name, meal_type):
-    row = get_pending_analysis(dest_id)
+def confirm_and_save_log(user_id, user_name, meal_type):
+    row = get_pending_analysis(user_id)
     if not row:
-        return "⚠️ 找不到最近的餐點分析記錄，請先傳送照片或文字讓飲食控制機器人評估喔！"
+        return "⚠️ 找不到你最近的餐點分析記錄，請先傳送照片或文字讓機器人評估喔！"
     
     desc, calories, protein, carbs, fat = row
     today = datetime.now().strftime("%Y-%m-%d")
@@ -117,7 +118,7 @@ def confirm_and_save_log(dest_id, user_name, meal_type):
         INSERT INTO daily_logs (user_name, log_date, meal_type, description, calories, protein, carbs, fat)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ''', (user_name, today, meal_type, desc, calories, protein, carbs, fat))
-    cursor.execute('DELETE FROM pending_logs WHERE dest_id = ?', (dest_id,))
+    cursor.execute('DELETE FROM pending_logs WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
     
@@ -348,7 +349,7 @@ def handle_text_message(event):
     if not user_text:
         return
 
-    dest_id = get_dest_id(event)
+    user_id = event.source.user_id
 
     if user_text.startswith("估價"):
         ticker = user_text.replace("估價", "").strip()
@@ -360,7 +361,7 @@ def handle_text_message(event):
     if record_match:
         user_name = record_match.group(1).strip()
         meal_type = record_match.group(2).strip()
-        reply_text = confirm_and_save_log(dest_id, user_name, meal_type)
+        reply_text = confirm_and_save_log(user_id, user_name, meal_type)
         reply_line(event.reply_token, reply_text)
         return
 
@@ -371,8 +372,8 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
-    # 1. 檢查是否有暫存紀錄需要微調
-    pending = get_pending_analysis(dest_id)
+    # 1. 檢查是否有個人暫存紀錄需要微調
+    pending = get_pending_analysis(user_id)
     modify_keywords = ["半碗", "去皮", "少飯", "微調", "改為", "換成", "不加", "少醬", "備註"]
     is_modify = any(kw in user_text for kw in modify_keywords)
 
@@ -383,28 +384,28 @@ def handle_text_message(event):
             response = call_gemini_with_retry(combined_prompt)
             reply_text = response.text
             desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
-            save_pending_analysis(dest_id, f"{base_desc} (備註: {user_text})", cal, p, c, f)
+            save_pending_analysis(user_id, f"{base_desc} (備註: {user_text})", cal, p, c, f)
             reply_text += "\n\n👉 已重新精算！確認後可輸入：`記錄在哲瑜的第一餐`"
         except Exception as e:
             reply_text = f"⚠️ 重新精算發生錯誤: {str(e)}"
         reply_line(event.reply_token, reply_text)
         return
 
-    # 2. 廣泛食物關鍵字過濾（解決像蛋白粉、橘子被漏掉的問題）
+    # 2. 食物關鍵字過濾
     food_keywords = ["吃", "喝", "蛋白粉", "蛋白飲", "橘子", "餐", "雞肉", "便當", "飯", "麵", "奶昔", "沙拉", "蛋", "燕麥", "水果", "高培", "乳清", "微克", "卡路里"]
     is_food_related = any(kw in user_text for kw in food_keywords)
 
     if event.source.type != 'user' and not is_food_related:
         return
 
-    # 3. 正常計算全新飲食內容
+    # 3. 計算全新的飲食內容
     full_prompt = f"{SYSTEM_PROMPT}\n\n使用者輸入的飲食內容：\n{user_text}"
     try:
         response = call_gemini_with_retry(full_prompt)
         reply_text = response.text
         
         desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
-        save_pending_analysis(dest_id, desc, cal, p, c, f)
+        save_pending_analysis(user_id, desc, cal, p, c, f)
         
         reply_text += (
             f"\n\n---------------------------------\n"
@@ -430,13 +431,14 @@ def reply_line(reply_token, text):
 def handle_image_message(event):
     message_id = event.message.id
     reply_token = event.reply_token
+    user_id = event.source.user_id
     dest_id = get_dest_id(event)
 
-    print(f"📥 收到圖片事件，Message ID: {message_id}, Dest ID: {dest_id}")
+    print(f"📥 收到圖片事件，Message ID: {message_id}, User ID: {user_id}")
     reply_line(reply_token, "📸 收到餐點照片！飲食控制機器人正在精算中，請稍候... ⏳")
-    threading.Thread(target=process_image_in_background, args=(message_id, dest_id)).start()
+    threading.Thread(target=process_image_in_background, args=(message_id, user_id, dest_id)).start()
 
-def process_image_in_background(message_id, dest_id):
+def process_image_in_background(message_id, user_id, dest_id):
     try:
         print("🔄 開始背景處理圖片...")
         with ApiClient(configuration) as api_client:
@@ -451,7 +453,7 @@ def process_image_in_background(message_id, dest_id):
         print("✅ Gemini 分析完成")
 
         desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
-        save_pending_analysis(dest_id, desc, cal, p, c, f)
+        save_pending_analysis(user_id, desc, cal, p, c, f)
 
         reply_text += (
             f"\n\n---------------------------------\n"
