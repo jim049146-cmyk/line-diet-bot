@@ -210,13 +210,10 @@ def get_daily_summary(user_name, user_id):
     if not food_rows and not workout_rows:
         return f"📊 [{user_name}] 今天尚無任何飲食與運動紀錄喔！"
     
-    # 計算飲食總計
     total_cal = sum(r[2] for r in food_rows)
     total_p = sum(r[3] for r in food_rows)
     total_c = sum(r[4] for r in food_rows)
     total_f = sum(r[5] for r in food_rows)
-    
-    # 計算運動消耗總計
     total_workout_cal = sum(r[1] for r in workout_rows)
     net_calories = total_cal - total_workout_cal
     
@@ -238,7 +235,6 @@ def get_daily_summary(user_name, user_id):
     for r in workout_rows:
         workout_detail += f"🏃 {r[0]} (消耗約 -{r[1]} kcal)\n"
 
-    # 🤖 呼叫 Gemini 產生專業教練總結講評
     coach_comment = "表現不錯，繼續保持！"
     try:
         comment_prompt = (
@@ -336,6 +332,7 @@ def callback():
 def home():
     return "Diet & Stock Bot is running!"
 
+# 📈 股票價值評估 + K線均線技術分析
 def analyze_stock_value(ticker_symbol: str) -> str:
     clean_ticker = ticker_symbol.strip().upper()
     full_ticker = clean_ticker if (clean_ticker.endswith(".TW") or clean_ticker.endswith(".TWO")) else f"{clean_ticker}.TW"
@@ -345,17 +342,37 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         session.headers.update({"User-Agent": "Mozilla/5.0"})
         stock = yf.Ticker(full_ticker, session=session)
         
-        price_history = stock.history(period="1d")
-        if price_history.empty:
+        # 抓取 3 個月歷史 K 線資料做技術分析
+        hist = stock.history(period="3mo")
+        if hist.empty:
             full_ticker = f"{clean_ticker}.TWO"
             stock = yf.Ticker(full_ticker, session=session)
-            price_history = stock.history(period="1d")
-            if price_history.empty:
-                return f"⚠️ 找不到股票代號 [{clean_ticker}] 的股價數據。"
+            hist = stock.history(period="3mo")
+            if hist.empty:
+                return f"⚠️ 找不到股票代號 [{clean_ticker}] 的股價與 K 線數據。"
         
-        current_price = round(price_history['Close'].iloc[-1], 2)
+        current_price = round(hist['Close'].iloc[-1], 2)
+        
+        # --- 1. 技術面 (K線與均線) 分析 ---
+        closes = hist['Close']
+        ma20 = round(closes.rolling(window=20).mean().iloc[-1], 2) if len(closes) >= 20 else current_price
+        ma60 = round(closes.rolling(window=60).mean().iloc[-1], 2) if len(closes) >= 60 else ma20
+        
+        if current_price > ma20 and ma20 > ma60:
+            tech_status = "🟢 技術面：多頭排列（強勢上升趨勢）"
+            tech_advice = "短中期均線向上，若股價回檔至月線(MA20)附近有支撐，為良好買點。"
+        elif current_price < ma20 and current_price > ma60:
+            tech_status = "🟡 技術面：回檔整理 / 月線附近震盪"
+            tech_advice = "股價處於月線與季線之間，屬於中期整理區，觀察能否在季線(MA60)守住。"
+        elif current_price < ma60:
+            tech_status = "🔴 技術面：空頭排列 / 跌破季線"
+            tech_advice = "短中期均線向下且跌破季線，技術面偏弱，切勿急著接刀，建議等待築底。"
+        else:
+            tech_status = "🟡 技術面：盤整打底中"
+            tech_advice = "均線糾結，無明顯單邊趨勢，建議觀望突破方向或分批小量佈局。"
+
+        # --- 2. 基本面 (EPS / 估值三色燈號) 分析 ---
         est_annual_eps = None
-        
         try:
             q_fin = stock.quarterly_financials
             if not q_fin.empty:
@@ -387,7 +404,7 @@ def analyze_stock_value(ticker_symbol: str) -> str:
                         break
 
         if not est_annual_eps or est_annual_eps <= 0:
-            return fallback_to_pb_valuation(stock, clean_ticker, current_price)
+            return fallback_to_pb_valuation(stock, clean_ticker, current_price, tech_status, tech_advice, ma20, ma60)
 
         low_pe, avg_pe, high_pe = 15.0, 22.0, 28.0
         green_price = round(est_annual_eps * low_pe, 1)
@@ -395,26 +412,35 @@ def analyze_stock_value(ticker_symbol: str) -> str:
         red_price = round(est_annual_eps * high_pe, 1)
         
         if current_price <= green_price:
-            status_light = "🟢 綠燈（特價區 / 安全邊際）"
-            action_advice = "現價具備價值投資買點！"
+            fund_light = "🟢 綠燈（特價區 / 安全邊際）"
+            fund_advice = "基本面評價具備價值投資買點！"
         elif current_price <= yellow_price:
-            status_light = "🟡 黃燈（合理區 / 定期定額）"
-            action_advice = "適合分批定期定額佈局。"
+            fund_light = "🟡 黃燈（合理區 / 定期定額）"
+            fund_advice = "基本面評價合理，適合分批定期定額。"
         else:
-            status_light = "🔴 紅燈（昂貴區 / 居高思危）"
-            action_advice = "評價偏高，建議暫時觀望。"
+            fund_light = "🔴 紅燈（昂貴區 / 居高思危）"
+            fund_advice = "基本面評價偏高，追高風險較大。"
 
         return (
-            f"📊 [{clean_ticker}] 智慧價值評估報告\n"
+            f"📊 [{clean_ticker}] 價值與技術綜合評估報告\n"
             f"---------------------------------\n"
             f"💵 現價：{current_price} 元 | 參考 EPS：{est_annual_eps} 元\n"
-            f"🟢 特價區：{green_price} | 🟡 合理區：{yellow_price} | 🔴 昂貴區：{red_price}\n"
-            f"🎯 評級：{status_light}\n💡 建議：{action_advice}"
+            f"📈 均線參考：月線(20MA) {ma20} | 季線(60MA) {ma60}\n"
+            f"---------------------------------\n"
+            f"1️⃣ 【基本面估值】\n"
+            f"• 特價區🟢：{green_price} | 合理區🟡：{yellow_price} | 昂貴區🔴：{red_price}\n"
+            f"• 估值評級：{fund_light}\n"
+            f"---------------------------------\n"
+            f"2️⃣ 【技術面 K線與均線】\n"
+            f"• 趨勢狀態：{tech_status}\n"
+            f"• 操作建議：{tech_advice}\n"
+            f"---------------------------------\n"
+            f"💡 **綜合策略**：{fund_advice}"
         )
     except Exception as e:
         return f"❌ 計算錯誤：{str(e)}"
 
-def fallback_to_pb_valuation(stock, clean_ticker, current_price):
+def fallback_to_pb_valuation(stock, clean_ticker, current_price, tech_status, tech_advice, ma20, ma60):
     try:
         url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         response = requests.get(url, timeout=10)
@@ -438,10 +464,19 @@ def fallback_to_pb_valuation(stock, clean_ticker, current_price):
                 pb_status = "🟡 黃燈（合理區）"
             else:
                 pb_status = "🔴 紅燈（相對高檔）"
-            return f"📊 [{clean_ticker}] P/B 評估\n💵 現價：{current_price} 元 | P/B：{pb_ratio} 倍\n🎯 評級：{pb_status}"
+            return (
+                f"📊 [{clean_ticker}] P/B 與技術綜合評估\n"
+                f"---------------------------------\n"
+                f"💵 現價：{current_price} 元 | P/B：{pb_ratio} 倍\n"
+                f"📈 均線參考：月線(20MA) {ma20} | 季線(60MA) {ma60}\n"
+                f"---------------------------------\n"
+                f"• P/B 評級：{pb_status}\n"
+                f"• 趨勢狀態：{tech_status}\n"
+                f"• 操作建議：{tech_advice}"
+            )
     except Exception:
         pass
-    return f"⚠️ [{clean_ticker}] 無法取得估價數據。"
+    return f"📊 [{clean_ticker}] 現價：{current_price} 元\n📈 均線：月線 {ma20} | 季線 {ma60}\n• 趨勢：{tech_status}\n• 建議：{tech_advice}"
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
