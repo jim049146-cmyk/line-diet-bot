@@ -177,7 +177,7 @@ def save_workout_log(user_id, user_name, workout_desc, est_calories):
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO workout_logs (user_id, user_name, log_date, workout_desc, est_calories)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
     ''', (user_id, user_name, today, workout_desc, est_calories))
     conn.commit()
     conn.close()
