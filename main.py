@@ -46,17 +46,18 @@ configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ----------------------------------------------------
-# 🗄️ SQLite 資料庫模組（支援個人檔案、飲食與運動紀錄）
+# 🗄️ SQLite 資料庫模組（支援個人檔案、飲食與運動紀錄，全面以 user_id 隔離）
 # ----------------------------------------------------
 DB_FILE = "health_logs.db"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # 1. 每日飲食紀錄表
+    # 1. 每日飲食紀錄表（加入 user_id 確保多用戶隔離）
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
             user_name TEXT,
             log_date TEXT,
             meal_type TEXT,
@@ -67,7 +68,7 @@ def init_db():
             fat REAL
         )
     ''')
-    # 2. 個人獨立飲食暫存表（以 user_id 為主鍵，群組多人互不覆蓋）
+    # 2. 個人獨立飲食暫存表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS pending_logs (
             user_id TEXT PRIMARY KEY,
@@ -155,9 +156,9 @@ def confirm_and_save_log(user_id, user_name, meal_type):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO daily_logs (user_name, log_date, meal_type, description, calories, protein, carbs, fat)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_name, today, meal_type, desc, calories, protein, carbs, fat))
+        INSERT INTO daily_logs (user_id, user_name, log_date, meal_type, description, calories, protein, carbs, fat)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, user_name, today, meal_type, desc, calories, protein, carbs, fat))
     cursor.execute('DELETE FROM pending_logs WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
@@ -176,22 +177,64 @@ def save_workout_log(user_id, user_name, workout_desc, est_calories):
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO workout_logs (user_id, user_name, log_date, workout_desc, est_calories)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
     ''', (user_id, user_name, today, workout_desc, est_calories))
     conn.commit()
     conn.close()
+
+def delete_last_log(user_id, log_type):
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    if log_type == "飲食":
+        cursor.execute('''
+            SELECT id, meal_type, description FROM daily_logs 
+            WHERE user_id = ? AND log_date = ? 
+            ORDER BY id DESC LIMIT 1
+        ''', (user_id, today))
+        row = cursor.fetchone()
+        if row:
+            log_id, meal_type, desc = row
+            cursor.execute('DELETE FROM daily_logs WHERE id = ?', (log_id,))
+            conn.commit()
+            conn.close()
+            return f"🗑️ 已成功刪除你今天最後一筆飲食紀錄：【{meal_type}】{desc}"
+        else:
+            conn.close()
+            return "⚠️ 你今天尚無任何已記錄的飲食資料可刪除。"
+            
+    elif log_type == "運動":
+        cursor.execute('''
+            SELECT id, workout_desc, est_calories FROM workout_logs 
+            WHERE user_id = ? AND log_date = ? 
+            ORDER BY id DESC LIMIT 1
+        ''', (user_id, today))
+        row = cursor.fetchone()
+        if row:
+            log_id, workout_desc, est_cal = row
+            cursor.execute('DELETE FROM workout_logs WHERE id = ?', (log_id,))
+            conn.commit()
+            conn.close()
+            return f"🗑️ 已成功刪除你今天最後一筆運動紀錄：{workout_desc} (-{est_cal} kcal)"
+        else:
+            conn.close()
+            return "⚠️ 你今天尚無任何已記錄的運動資料可刪除。"
+            
+    conn.close()
+    return "⚠️ 刪除指令格式有誤，請輸入：`刪除飲食` 或 `刪除運動`"
 
 def get_daily_summary(user_name, user_id):
     today = datetime.now().strftime("%Y-%m-%d")
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # 查詢飲食
+    # 改用 user_id 精準查詢今日飲食，絕不出錯
     cursor.execute('''
         SELECT meal_type, description, calories, protein, carbs, fat 
         FROM daily_logs 
-        WHERE user_name = ? AND log_date = ?
-    ''', (user_name, today))
+        WHERE user_id = ? AND log_date = ?
+    ''', (user_id, today))
     food_rows = cursor.fetchall()
     
     # 查詢運動
@@ -502,7 +545,17 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"✅ [{user_name}] 的身體數據設定成功！\n身高：{h}cm | 體重：{w}kg | 體脂：{bf}% | 目標：{goal}")
         return
 
-    # 3. 運動紀錄指令：哲瑜運動 重訓 60分鐘
+    # 3. 刪除紀錄指令：刪除飲食 / 刪除運動
+    if user_text in ["刪除飲食", "刪除第一餐", "刪除餐點"]:
+        reply_text = delete_last_log(user_id, "飲食")
+        reply_line(event.reply_token, reply_text)
+        return
+    if user_text in ["刪除運動", "刪除健身"]:
+        reply_text = delete_last_log(user_id, "運動")
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 4. 運動紀錄指令：哲瑜運動 重訓 60分鐘
     workout_match = re.search(r"([^\s]+)\s*運動\s*(.+)", user_text)
     if workout_match:
         user_name = workout_match.group(1).strip()
@@ -517,19 +570,20 @@ def handle_text_message(event):
             est_cal = 300.0
             
         save_workout_log(user_id, user_name, workout_desc, est_cal)
-        reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal")
+        reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal\n\n💡 若剛才不小心記錯，可輸入：`刪除運動` 進行修正！")
         return
 
-    # 4. 存入帳本指令：記錄在哲瑜的第一餐 / 記在哲瑜的點心
+    # 5. 存入帳本指令：記錄在哲瑜的第一餐 / 記在哲瑜的點心
     record_match = re.search(r"(?:記錄在|記在)\s*([^\s的]+)\s*的\s*([^\s]+)", user_text)
     if record_match:
         user_name = record_match.group(1).strip()
         meal_type = record_match.group(2).strip()
         reply_text = confirm_and_save_log(user_id, user_name, meal_type)
+        reply_text += "\n\n💡 若剛才不小心記錯，可輸入：`刪除飲食` 進行修正！"
         reply_line(event.reply_token, reply_text)
         return
 
-    # 5. 總結指令：哲瑜今日總結
+    # 6. 總結指令：哲瑜今日總結
     summary_match = re.search(r"([^\s]+)\s*(?:今日總結|今天的總結)", user_text)
     if summary_match:
         user_name = summary_match.group(1).replace("查看", "").strip()
@@ -537,7 +591,7 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
-    # 6. 飲食內容更正指令（支援透過「更正」關鍵字對上一張照片內容進行修正）
+    # 7. 飲食內容更正指令（支援透過「更正」關鍵字對上一張照片內容進行修正）
     pending = get_pending_analysis(user_id)
     modify_keywords = ["更正", "修正", "改為", "換成", "備註", "補充"]
     is_modify = any(kw in user_text for kw in modify_keywords)
@@ -562,14 +616,14 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
-    # 7. 食物關鍵字過濾
+    # 8. 食物關鍵字過濾
     food_keywords = ["吃", "喝", "蛋白粉", "蛋白飲", "橘子", "餐", "雞肉", "便當", "飯", "麵", "奶昔", "沙拉", "蛋", "燕麥", "水果", "高培", "乳清", "微克", "卡路里"]
     is_food_related = any(kw in user_text for kw in food_keywords)
 
     if event.source.type != 'user' and not is_food_related:
         return
 
-    # 8. 計算全新飲食內容
+    # 9. 計算全新飲食內容
     full_prompt = f"{SYSTEM_PROMPT}\n\n使用者輸入的飲食內容：\n{user_text}"
     try:
         response = call_gemini_with_retry(full_prompt)
