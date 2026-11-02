@@ -439,4 +439,284 @@ def analyze_stock_value(ticker_symbol: str) -> str:
             tech_advice = "短中期均線向下且跌破季線，技術面偏弱，切勿急著接刀，建議等待築底。"
         else:
             tech_status = "🟡 技術面：盤整打底中"
-            tech_advice = "均線糾
+            tech_advice = "均線糾結，無明顯單邊趨勢，建議觀望突破方向或分批小量佈局。"
+
+        est_annual_eps = None
+        try:
+            q_fin = stock.quarterly_financials
+            if not q_fin.empty:
+                eps_row = None
+                for name in ['Basic EPS', 'Diluted EPS', 'Basic Earnings Per Share']:
+                    if name in q_fin.index:
+                        eps_row = q_fin.loc[name].dropna()
+                        break
+                if eps_row is not None and len(eps_row) >= 2:
+                    recent_h1_eps = eps_row.iloc[:2].sum()
+                    forward_run_rate_eps = round(recent_h1_eps * 2, 2)
+                    if forward_run_rate_eps > 0:
+                        est_annual_eps = forward_run_rate_eps
+        except Exception:
+            pass
+
+        if not est_annual_eps or est_annual_eps <= 0:
+            url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                for item in response.json():
+                    if item.get("Code") == clean_ticker:
+                        pe_str = item.get("PEratio", "").strip()
+                        if pe_str and pe_str != "-" and pe_str != "0":
+                            try:
+                                est_annual_eps = round(current_price / float(pe_str), 2)
+                            except ValueError:
+                                pass
+                        break
+
+        if not est_annual_eps or est_annual_eps <= 0:
+            return fallback_to_pb_valuation(stock, clean_ticker, current_price, tech_status, tech_advice, ma20, ma60)
+
+        low_pe, avg_pe, high_pe = 15.0, 22.0, 28.0
+        green_price = round(est_annual_eps * low_pe, 1)
+        yellow_price = round(est_annual_eps * avg_pe, 1)
+        red_price = round(est_annual_eps * high_pe, 1)
+        
+        if current_price <= green_price:
+            fund_light = "🟢 綠燈（特價區 / 安全邊際）"
+            fund_advice = "基本面評價具備價值投資買點！"
+        elif current_price <= yellow_price:
+            fund_light = "🟡 黃燈（合理區 / 定期定額）"
+            fund_advice = "基本面評價合理，適合分批定期定額。"
+        else:
+            fund_light = "🔴 紅燈（昂貴區 / 居高思危）"
+            fund_advice = "基本面評價偏高，追高風險較大。"
+
+        return (
+            f"📊 [{clean_ticker}] 價值與技術綜合評估報告\n"
+            f"---------------------------------\n"
+            f"💵 現價：{current_price} 元 | 參考 EPS：{est_annual_eps} 元\n"
+            f"📈 均線參考：月線(20MA) {ma20} | 季線(60MA) {ma60}\n"
+            f"---------------------------------\n"
+            f"1️⃣ 【基本面估值】\n"
+            f"• 特價區🟢：{green_price} | 合理區🟡：{yellow_price} | 昂貴區🔴：{red_price}\n"
+            f"• 估值評級：{fund_light}\n"
+            f"---------------------------------\n"
+            f"2️⃣ 【技術面 K線與均線】\n"
+            f"• 趨勢狀態：{tech_status}\n"
+            f"• 操作建議：{tech_advice}\n"
+            f"---------------------------------\n"
+            f"💡 **綜合策略**：{fund_advice}"
+        )
+    except Exception as e:
+        return f"❌ 計算錯誤：{str(e)}"
+
+def fallback_to_pb_valuation(stock, clean_ticker, current_price, tech_status, tech_advice, ma20, ma60):
+    try:
+        url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+        response = requests.get(url, timeout=10)
+        pb_ratio = None
+        if response.status_code == 200:
+            for item in response.json():
+                if item.get("Code") == clean_ticker:
+                    for pb_key in ["PBratio", "PB", "PriceToBookRatio"]:
+                        pb_str = item.get(pb_key, "").strip()
+                        if pb_str and pb_str != "-" and pb_str != "0":
+                            try:
+                                pb_ratio = float(pb_str)
+                                break
+                            except ValueError:
+                                pass
+                    break
+        if pb_ratio and pb_ratio > 0:
+            if pb_ratio < 1.0:
+                pb_status = "🟢 綠燈（淨值以下）"
+            elif pb_ratio <= 1.3:
+                pb_status = "🟡 黃燈（合理區）"
+            else:
+                pb_status = "🔴 紅燈（相對高檔）"
+            return (
+                f"📊 [{clean_ticker}] P/B 與技術綜合評估\n"
+                f"---------------------------------\n"
+                f"💵 現價：{current_price} 元 | P/B：{pb_ratio} 倍\n"
+                f"📈 均線參考：月線(20MA) {ma20} | 季線(60MA) {ma60}\n"
+                f"---------------------------------\n"
+                f"• P/B 評級：{pb_status}\n"
+                f"• 趨勢狀態：{tech_status}\n"
+                f"• 操作建議：{tech_advice}"
+            )
+    except Exception:
+        pass
+    return f"📊 [{clean_ticker}] 現價：{current_price} 元\n📈 均線：月線 {ma20} | 季線 {ma60}\n• 趨勢：{tech_status}\n• 建議：{tech_advice}"
+
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_text_message(event):
+    user_text = event.message.text.strip()
+    if not user_text:
+        return
+
+    user_id = event.source.user_id
+
+    # 1. 股市估價指令：估價2330
+    if user_text.startswith("估價"):
+        ticker = user_text.replace("估價", "").strip()
+        reply_text = "請輸入正確代號，例如：`估價2330`" if not ticker else analyze_stock_value(ticker)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 2. 設定個人身體數據指令：設定 哲瑜 身高 175 體重 70 體脂 18 目標 減脂
+    profile_match = re.search(r"設定\s*([^\s]+)\s*身高\s*(\d+(?:\.\d+)?)\s*體重\s*(\d+(?:\.\d+)?)\s*體脂\s*(\d+(?:\.\d+)?)\s*目標\s*([^\s]+)", user_text)
+    if profile_match:
+        user_name = profile_match.group(1).strip()
+        h = float(profile_match.group(2))
+        w = float(profile_match.group(3))
+        bf = float(profile_match.group(4))
+        goal = profile_match.group(5).strip()
+        save_user_profile(user_id, user_name, h, w, bf, goal)
+        reply_line(event.reply_token, f"✅ [{user_name}] 的身體數據設定成功！\n身高：{h}cm | 體重：{w}kg | 體脂：{bf}% | 目標：{goal}")
+        return
+
+    # 3. 刪除紀錄指令（升級版：支援刪除特定餐別、點心、第四餐、第五餐與運動）
+    if "刪除" in user_text and not user_text.startswith("更正"):
+        reply_text = delete_log_dynamically(user_id, user_text)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 4. 運動紀錄指令：哲瑜運動 重訓 60分鐘
+    workout_match = re.search(r"([^\s]+)\s*運動\s*(.+)", user_text)
+    if workout_match:
+        user_name = workout_match.group(1).strip()
+        workout_desc = workout_match.group(2).strip()
+        
+        try:
+            w_prompt = f"請評估以下運動內容大約消耗多少大卡（以一般成人體重估算），只要回傳一個數字（例如：350）：\n{workout_desc}"
+            w_res = call_gemini_with_retry(w_prompt)
+            cal_match = re.search(r"(\d+)", w_res.text)
+            est_cal = float(cal_match.group(1)) if cal_match else 300.0
+        except Exception:
+            est_cal = 300.0
+            
+        save_workout_log(user_id, user_name, workout_desc, est_cal)
+        reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal\n\n💡 若剛才不小心記錯，可輸入：`刪除運動` 進行修正！")
+        return
+
+    # 5. 存入帳本指令：記錄在哲瑜的第一餐 / 記在哲瑜的點心
+    record_match = re.search(r"(?:記錄在|記在)\s*([^\s的]+)\s*的\s*([^\s]+)", user_text)
+    if record_match:
+        user_name = record_match.group(1).strip()
+        meal_type = record_match.group(2).strip()
+        reply_text = confirm_and_save_log(user_id, user_name, meal_type)
+        reply_text += "\n\n💡 若剛才不小心記錯，可輸入：`刪除飲食` 或 `刪除第四餐` 進行修正！"
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 6. 總結指令：哲瑜今日總結
+    summary_match = re.search(r"([^\s]+)\s*(?:今日總結|今天的總結)", user_text)
+    if summary_match:
+        user_name = summary_match.group(1).replace("查看", "").strip()
+        reply_text = get_daily_summary(user_name, user_id)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 7. 飲食內容更正指令（透過「更正」關鍵字對上一筆暫存內容進行覆蓋修正）
+    pending = get_pending_analysis(user_id)
+    modify_keywords = ["更正", "修正", "改為", "換成", "備註", "補充"]
+    is_modify = any(kw in user_text for kw in modify_keywords)
+
+    if pending and is_modify:
+        base_desc = pending[0]
+        combined_prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"【學員更正說明】：\n"
+            f"原本辨識內容為：{base_desc}\n"
+            f"學員輸入的實際更正內容為：{user_text}\n\n"
+            f"請以學員提供的更正內容為主，重新估算精確的熱量與三大營養素。"
+        )
+        try:
+            response = call_gemini_with_retry(combined_prompt)
+            reply_text = response.text
+            desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
+            save_pending_analysis(user_id, desc, cal, p, c, f)
+            reply_text += "\n\n👉 已成功為你更正餐點內容！確認後可直接輸入：`記錄在哲瑜的第一餐`"
+        except Exception as e:
+            reply_text = f"⚠️ 更正重新精算發生錯誤: {str(e)}"
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 8. 防洗板機制：如果是群組聊天，必須包含 @機器人（例如 @HabitEats 或 @bot）才觸發純文字飲食計算
+    is_group_chat = (event.source.type != 'user')
+    bot_mentioned = ("@HabitEats" in user_text) or ("@bot" in user_text) or ("@機器人" in user_text)
+
+    if is_group_chat and not bot_mentioned:
+        return  # 群組內一般閒聊完全靜默不處理
+
+    # 如果有被 @，把提及字眼濾掉乾淨
+    clean_text = user_text.replace("@HabitEats", "").replace("@bot", "").replace("@機器人", "").strip()
+    if not clean_text:
+        return
+
+    # 9. 計算全新飲食內容（支援 @機器人觸發的純文字飲食估算）
+    full_prompt = f"{SYSTEM_PROMPT}\n\n使用者輸入的飲食內容：\n{clean_text}"
+    try:
+        response = call_gemini_with_retry(full_prompt)
+        reply_text = response.text
+        
+        desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
+        save_pending_analysis(user_id, desc, cal, p, c, f)
+        
+        reply_text += (
+            f"\n\n---------------------------------\n"
+            f"💡 **小提示**：確認這筆內容無誤後，可直接輸入："
+            f"`記錄在哲瑜的第一餐` 或 `記在哲瑜的點心` 進行存檔！"
+        )
+    except Exception as e:
+        reply_text = f"⚠️ 系統錯誤: {str(e)}"
+
+    reply_line(event.reply_token, reply_text)
+
+def reply_line(reply_token, text):
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=text)]
+            )
+        )
+
+# 📸 圖片事件處理（同步 Reply，不耗 Push 額度）
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image_message(event):
+    message_id = event.message.id
+    reply_token = event.reply_token
+    user_id = event.source.user_id
+
+    print(f"📥 收到圖片事件，Message ID: {message_id}, User ID: {user_id}")
+
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_blob_api = MessagingApiBlob(api_client)
+            image_bytes = line_bot_blob_api.get_message_content(message_id)
+
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
+
+        response = call_gemini_with_retry([SYSTEM_PROMPT, image_part])
+        reply_text = response.text
+
+        desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
+        save_pending_analysis(user_id, desc, cal, p, c, f)
+
+        reply_text += (
+            f"\n\n---------------------------------\n"
+            f"💡 **小提示**：如果照片辨識內容有誤，"
+            f"可以直接打字加上「更正」來告訴我真實內容（例如：`更正 清燉帶皮羊肉湯4塊肉...`）！\n"
+            f"確認無誤後，可直接輸入：`記錄在哲瑜的第一餐`"
+        )
+
+    except Exception as e:
+        print("❌ 圖片處理發生錯誤:", traceback.format_exc())
+        reply_text = f"⚠️ 圖片分析時發生了一點狀況，請稍後再試一次！"
+
+    reply_line(reply_token, reply_text)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
