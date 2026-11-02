@@ -46,14 +46,13 @@ configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ----------------------------------------------------
-# 🗄️ SQLite 資料庫模組（支援個人檔案、飲食與運動紀錄，全面以 user_id 隔離）
+# 🗄️ SQLite 資料庫模組
 # ----------------------------------------------------
 DB_FILE = "health_logs.db"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # 1. 每日飲食紀錄表（加入 user_id 確保多用戶隔離）
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +67,6 @@ def init_db():
             fat REAL
         )
     ''')
-    # 2. 個人獨立飲食暫存表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS pending_logs (
             user_id TEXT PRIMARY KEY,
@@ -80,7 +78,6 @@ def init_db():
             created_at TEXT
         )
     ''')
-    # 3. 使用者身體數據與目標表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_profiles (
             user_id TEXT PRIMARY KEY,
@@ -91,7 +88,6 @@ def init_db():
             goal TEXT
         )
     ''')
-    # 4. 每日運動紀錄表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS workout_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,14 +114,6 @@ def save_user_profile(user_id, user_name, height, weight, body_fat, goal):
     conn.commit()
     conn.close()
 
-def get_user_profile(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_name, height, weight, body_fat, goal FROM user_profiles WHERE user_id = ?', (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
-
 def save_pending_analysis(user_id, description, calories, protein, carbs, fat):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -145,11 +133,37 @@ def get_pending_analysis(user_id):
     conn.close()
     return row
 
-def confirm_and_save_log(user_id, user_name, meal_type):
+def confirm_and_save_log(user_id, user_name, meal_input):
     row = get_pending_analysis(user_id)
     if not row:
         return "⚠️ 找不到你最近的餐點分析記錄，請先傳送照片或文字讓機器人評估喔！"
     
+    # 🌟 智慧正規化餐別：支援「點心1」、「點心2」、「第一餐」等格式
+    meal_type = meal_input
+    snatch_num = re.search(r'([0-9一二三四五六七八九十]+)', meal_input)
+    if "點心" in meal_input or "宵夜" in meal_input:
+        if snatch_num:
+            num = snatch_num.group(1)
+            # 轉換中文數字轉阿拉伯數字的小優化
+            cn_map = {'一':'1', '二':'2', '三':'3', '四':'4', '五':'5', '六':'6', '七':'7', '八':'8', '九':'9', '十':'10'}
+            num = cn_map.get(num, num)
+            meal_type = f"點心{num}"
+        else:
+            meal_type = "點心1" # 預設第一份點心
+    elif "餐" in meal_input:
+        match = re.search(r'第?([0-9一二三四五六七八九十]+)餐', meal_input)
+        if match:
+            num = match.group(1)
+            cn_map = {'一':'1', '二':'2', '三':'3', '四':'4', '五':'5', '六':'6', '七':'7', '八':'8', '九':'9', '十':'10'}
+            num = cn_map.get(num, num)
+            meal_type = f"第{num}餐"
+    elif meal_input in ["早餐", "早"]:
+        meal_type = "第1餐"
+    elif meal_input in ["午餐", "午"]:
+        meal_type = "第2餐"
+    elif meal_input in ["晚餐", "晚"]:
+        meal_type = "第3餐"
+
     desc, calories, protein, carbs, fat = row
     today = datetime.now().strftime("%Y-%m-%d")
     
@@ -182,7 +196,7 @@ def save_workout_log(user_id, user_name, workout_desc, est_calories):
     conn.commit()
     conn.close()
 
-# 🛠️ 升級版動態刪除函式（支援刪除指定餐別、點心、運動或備援刪除最後一筆）
+# 🛠️ 升級版動態刪除函式（支援刪除「點心1」、「點心2」、「第X餐」與運動）
 def delete_log_dynamically(user_id, user_text):
     today = datetime.now().strftime("%Y-%m-%d")
     conn = sqlite3.connect(DB_FILE)
@@ -206,23 +220,35 @@ def delete_log_dynamically(user_id, user_text):
             conn.close()
             return "⚠️ 你今天尚無任何已記錄的運動資料可刪除。"
 
-    # 2. 處理飲食刪除（支援動態抓取「第X餐」、點心、宵夜、早餐、午餐、晚餐）
+    # 2. 處理飲食刪除（支援精準比對：點心1、點心2、第4餐...）
     target_meal = None
-    match = re.search(r'第([一二三四五六七八九十0-9]+)餐', user_text)
-    if match:
-        meal_num = match.group(1)
-        target_meal = f"第{meal_num}餐"
-    elif "點心" in user_text or "宵夜" in user_text:
-        target_meal = "點心" if "點心" in user_text else "宵夜"
-    elif "早餐" in user_text or "第一餐" in user_text:
-        target_meal = "第一餐"
-    elif "午餐" in user_text or "第二餐" in user_text:
-        target_meal = "第二餐"
-    elif "晚餐" in user_text or "第三餐" in user_text:
-        target_meal = "第三餐"
+    
+    # 判斷是否為點心系列
+    if "點心" in user_text or "宵夜" in user_text:
+        match_snack = re.search(r'([0-9一二三四五六七八九十]+)', user_text.replace("刪除", ""))
+        if match_snack:
+            num = match_snack.group(1)
+            cn_map = {'一':'1', '二':'2', '三':'3', '四':'4', '五':'5', '六':'6', '七':'7', '八':'8', '九':'9', '十':'10'}
+            num = cn_map.get(num, num)
+            target_meal = f"點心{num}"
+        else:
+            target_meal = "點心1"
+    # 判斷是否為第X餐系列
+    elif "餐" in user_text:
+        match_meal = re.search(r'第?([0-9一二三四五六七八九十]+)餐', user_text)
+        if match_meal:
+            num = match_meal.group(1)
+            cn_map = {'一':'1', '二':'2', '三':'3', '四':'4', '五':'5', '六':'6', '七':'7', '八':'8', '九':'9', '十':'10'}
+            num = cn_map.get(num, num)
+            target_meal = f"第{num}餐"
+    elif "早餐" in user_text:
+        target_meal = "第1餐"
+    elif "午餐" in user_text:
+        target_meal = "第2餐"
+    elif "晚餐" in user_text:
+        target_meal = "第3餐"
 
     if target_meal:
-        # 尋找該學員今日有沒有這一餐的紀錄
         cursor.execute('''
             SELECT id, description FROM daily_logs 
             WHERE user_id = ? AND log_date = ? AND meal_type = ?
@@ -555,14 +581,14 @@ def handle_text_message(event):
 
     user_id = event.source.user_id
 
-    # 1. 股市估價指令：估價2330
+    # 1. 股市估價指令
     if user_text.startswith("估價"):
         ticker = user_text.replace("估價", "").strip()
         reply_text = "請輸入正確代號，例如：`估價2330`" if not ticker else analyze_stock_value(ticker)
         reply_line(event.reply_token, reply_text)
         return
 
-    # 2. 設定個人身體數據指令：設定 哲瑜 身高 175 體重 70 體脂 18 目標 減脂
+    # 2. 設定個人身體數據指令
     profile_match = re.search(r"設定\s*([^\s]+)\s*身高\s*(\d+(?:\.\d+)?)\s*體重\s*(\d+(?:\.\d+)?)\s*體脂\s*(\d+(?:\.\d+)?)\s*目標\s*([^\s]+)", user_text)
     if profile_match:
         user_name = profile_match.group(1).strip()
@@ -574,13 +600,13 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"✅ [{user_name}] 的身體數據設定成功！\n身高：{h}cm | 體重：{w}kg | 體脂：{bf}% | 目標：{goal}")
         return
 
-    # 3. 刪除紀錄指令（升級版：支援刪除特定餐別、點心、第四餐、第五餐與運動）
+    # 3. 刪除紀錄指令（支援刪除點心1、點心2、第4餐、運動等）
     if "刪除" in user_text and not user_text.startswith("更正"):
         reply_text = delete_log_dynamically(user_id, user_text)
         reply_line(event.reply_token, reply_text)
         return
 
-    # 4. 運動紀錄指令：哲瑜運動 重訓 60分鐘
+    # 4. 運動紀錄指令
     workout_match = re.search(r"([^\s]+)\s*運動\s*(.+)", user_text)
     if workout_match:
         user_name = workout_match.group(1).strip()
@@ -598,17 +624,17 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal\n\n💡 若剛才不小心記錯，可輸入：`刪除運動` 進行修正！")
         return
 
-    # 5. 存入帳本指令：記錄在哲瑜的第一餐 / 記在哲瑜的點心
+    # 5. 存入帳本指令：支援 記錄在哲瑜的點心1 / 記錄在哲瑜的點心2 / 記錄在哲瑜的第4餐
     record_match = re.search(r"(?:記錄在|記在)\s*([^\s的]+)\s*的\s*([^\s]+)", user_text)
     if record_match:
         user_name = record_match.group(1).strip()
         meal_type = record_match.group(2).strip()
         reply_text = confirm_and_save_log(user_id, user_name, meal_type)
-        reply_text += "\n\n💡 若剛才不小心記錯，可輸入：`刪除飲食` 或 `刪除第四餐` 進行修正！"
+        reply_text += "\n\n💡 若剛才不小心記錯，可輸入：`刪除點心1` 或 `刪除第四餐` 進行修正！"
         reply_line(event.reply_token, reply_text)
         return
 
-    # 6. 總結指令：哲瑜今日總結
+    # 6. 總結指令
     summary_match = re.search(r"([^\s]+)\s*(?:今日總結|今天的總結)", user_text)
     if summary_match:
         user_name = summary_match.group(1).replace("查看", "").strip()
@@ -616,7 +642,7 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
-    # 7. 飲食內容更正指令（透過「更正」關鍵字對上一筆暫存內容進行覆蓋修正）
+    # 7. 飲食內容更正指令
     pending = get_pending_analysis(user_id)
     modify_keywords = ["更正", "修正", "改為", "換成", "備註", "補充"]
     is_modify = any(kw in user_text for kw in modify_keywords)
@@ -635,25 +661,24 @@ def handle_text_message(event):
             reply_text = response.text
             desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
             save_pending_analysis(user_id, desc, cal, p, c, f)
-            reply_text += "\n\n👉 已成功為你更正餐點內容！確認後可直接輸入：`記錄在哲瑜的第一餐`"
+            reply_text += "\n\n👉 已成功為你更正餐點內容！確認後可直接輸入：`記錄在哲瑜的點心1`"
         except Exception as e:
             reply_text = f"⚠️ 更正重新精算發生錯誤: {str(e)}"
         reply_line(event.reply_token, reply_text)
         return
 
-    # 8. 防洗板機制：如果是群組聊天，必須包含 @機器人（例如 @HabitEats 或 @bot）才觸發純文字飲食計算
+    # 8. 防洗板機制：群組內必須包含 @機器人 才觸發
     is_group_chat = (event.source.type != 'user')
     bot_mentioned = ("@HabitEats" in user_text) or ("@bot" in user_text) or ("@機器人" in user_text)
 
     if is_group_chat and not bot_mentioned:
-        return  # 群組內一般閒聊完全靜默不處理
+        return
 
-    # 如果有被 @，把提及字眼濾掉乾淨
     clean_text = user_text.replace("@HabitEats", "").replace("@bot", "").replace("@機器人", "").strip()
     if not clean_text:
         return
 
-    # 9. 計算全新飲食內容（支援 @機器人觸發的純文字飲食估算）
+    # 9. 計算全新飲食內容
     full_prompt = f"{SYSTEM_PROMPT}\n\n使用者輸入的飲食內容：\n{clean_text}"
     try:
         response = call_gemini_with_retry(full_prompt)
@@ -665,7 +690,7 @@ def handle_text_message(event):
         reply_text += (
             f"\n\n---------------------------------\n"
             f"💡 **小提示**：確認這筆內容無誤後，可直接輸入："
-            f"`記錄在哲瑜的第一餐` 或 `記在哲瑜的點心` 進行存檔！"
+            f"`記錄在哲瑜的點心1` 或 `記在哲瑜的第4餐` 進行存檔！"
         )
     except Exception as e:
         reply_text = f"⚠️ 系統錯誤: {str(e)}"
@@ -682,14 +707,12 @@ def reply_line(reply_token, text):
             )
         )
 
-# 📸 圖片事件處理（同步 Reply，不耗 Push 額度）
+# 📸 圖片事件處理
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     message_id = event.message.id
     reply_token = event.reply_token
     user_id = event.source.user_id
-
-    print(f"📥 收到圖片事件，Message ID: {message_id}, User ID: {user_id}")
 
     try:
         with ApiClient(configuration) as api_client:
@@ -707,8 +730,8 @@ def handle_image_message(event):
         reply_text += (
             f"\n\n---------------------------------\n"
             f"💡 **小提示**：如果照片辨識內容有誤，"
-            f"可以直接打字加上「更正」來告訴我真實內容（例如：`更正 清燉帶皮羊肉湯4塊肉...`）！\n"
-            f"確認無誤後，可直接輸入：`記錄在哲瑜的第一餐`"
+            f"可以直接打字加上「更正」來告訴我真實內容！\n"
+            f"確認無誤後，可直接輸入：`記錄在哲瑜的點心1`"
         )
 
     except Exception as e:
