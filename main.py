@@ -144,12 +144,11 @@ def confirm_and_save_log(user_id, user_name, meal_input):
     if "點心" in meal_input or "宵夜" in meal_input:
         if snatch_num:
             num = snatch_num.group(1)
-            # 轉換中文數字轉阿拉伯數字的小優化
             cn_map = {'一':'1', '二':'2', '三':'3', '四':'4', '五':'5', '六':'6', '七':'7', '八':'8', '九':'9', '十':'10'}
             num = cn_map.get(num, num)
             meal_type = f"點心{num}"
         else:
-            meal_type = "點心1" # 預設第一份點心
+            meal_type = "點心1"
     elif "餐" in meal_input:
         match = re.search(r'第?([0-9一二三四五六七八九十]+)餐', meal_input)
         if match:
@@ -196,13 +195,12 @@ def save_workout_log(user_id, user_name, workout_desc, est_calories):
     conn.commit()
     conn.close()
 
-# 🛠️ 升級版動態刪除函式（支援刪除「點心1」、「點心2」、「第X餐」與運動）
+# 🛠️ 動態刪除函式
 def delete_log_dynamically(user_id, user_text):
     today = datetime.now().strftime("%Y-%m-%d")
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # 1. 處理運動刪除
     if "運動" in user_text or "健身" in user_text:
         cursor.execute('''
             SELECT id, workout_desc, est_calories FROM workout_logs 
@@ -220,10 +218,7 @@ def delete_log_dynamically(user_id, user_text):
             conn.close()
             return "⚠️ 你今天尚無任何已記錄的運動資料可刪除。"
 
-    # 2. 處理飲食刪除（支援精準比對：點心1、點心2、第4餐...）
     target_meal = None
-    
-    # 判斷是否為點心系列
     if "點心" in user_text or "宵夜" in user_text:
         match_snack = re.search(r'([0-9一二三四五六七八九十]+)', user_text.replace("刪除", ""))
         if match_snack:
@@ -233,7 +228,6 @@ def delete_log_dynamically(user_id, user_text):
             target_meal = f"點心{num}"
         else:
             target_meal = "點心1"
-    # 判斷是否為第X餐系列
     elif "餐" in user_text:
         match_meal = re.search(r'第?([0-9一二三四五六七八九十]+)餐', user_text)
         if match_meal:
@@ -265,7 +259,6 @@ def delete_log_dynamically(user_id, user_text):
             conn.close()
             return f"⚠️ 找不到今日【{target_meal}】的紀錄，請確認名稱是否正確。"
     else:
-        # 備援：若只打「刪除飲食」或「刪除」，則直接刪除最後一筆飲食紀錄
         cursor.execute('''
             SELECT id, meal_type, description FROM daily_logs 
             WHERE user_id = ? AND log_date = ? 
@@ -600,7 +593,7 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"✅ [{user_name}] 的身體數據設定成功！\n身高：{h}cm | 體重：{w}kg | 體脂：{bf}% | 目標：{goal}")
         return
 
-    # 3. 刪除紀錄指令（支援刪除點心1、點心2、第4餐、運動等）
+    # 3. 刪除紀錄指令
     if "刪除" in user_text and not user_text.startswith("更正"):
         reply_text = delete_log_dynamically(user_id, user_text)
         reply_line(event.reply_token, reply_text)
@@ -624,8 +617,8 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal\n\n💡 若剛才不小心記錯，可輸入：`刪除運動` 進行修正！")
         return
 
-    # 5. 存入帳本指令：支援 記錄在哲瑜的點心1 / 記錄在哲瑜的點心2 / 記錄在哲瑜的第4餐
-    record_match = re.search(r"(?:記錄在|記在)\s*([^\s的]+)\s*的\s*([^\s]+)", user_text)
+    # 5. 存入帳本指令：完整支援 記錄在、紀錄在、記在、紀在、記、紀（含「在」與「的」之各種組合與省寫）
+    record_match = re.search(r"(?:紀錄|記錄|記|紀)在?\s*([^\s的]+)\s*(?:的)?\s*([^\s]+)", user_text)
     if record_match:
         user_name = record_match.group(1).strip()
         meal_type = record_match.group(2).strip()
@@ -661,7 +654,7 @@ def handle_text_message(event):
             reply_text = response.text
             desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
             save_pending_analysis(user_id, desc, cal, p, c, f)
-            reply_text += "\n\n👉 已成功為你更正餐點內容！確認後可直接輸入：`記錄在哲瑜的點心1`"
+            reply_text += "\n\n👉 已成功為你更正餐點內容！確認後可直接輸入：`紀錄在哲瑜的點心1` 或 `記哲瑜點心1`"
         except Exception as e:
             reply_text = f"⚠️ 更正重新精算發生錯誤: {str(e)}"
         reply_line(event.reply_token, reply_text)
@@ -690,7 +683,7 @@ def handle_text_message(event):
         reply_text += (
             f"\n\n---------------------------------\n"
             f"💡 **小提示**：確認這筆內容無誤後，可直接輸入："
-            f"`記錄在哲瑜的點心1` 或 `記在哲瑜的第4餐` 進行存檔！"
+            f"`記錄在哲瑜的點心1`、`記哲瑜的第4餐` 或 `紀 哲瑜 點心1` 進行存檔！"
         )
     except Exception as e:
         reply_text = f"⚠️ 系統錯誤: {str(e)}"
@@ -731,7 +724,7 @@ def handle_image_message(event):
             f"\n\n---------------------------------\n"
             f"💡 **小提示**：如果照片辨識內容有誤，"
             f"可以直接打字加上「更正」來告訴我真實內容！\n"
-            f"確認無誤後，可直接輸入：`記錄在哲瑜的點心1`"
+            f"確認無誤後，可直接輸入：`紀錄在哲瑜的點心1` 或 `記哲瑜點心1`"
         )
 
     except Exception as e:
