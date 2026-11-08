@@ -46,7 +46,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # 初始化新版 Gemini Client
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = "gemini-2.5-flash"
+MODEL_ID = "gemini-3.5-flash-lite"
 
 # 初始化 LINE SDK 與 handler
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
