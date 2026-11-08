@@ -762,6 +762,27 @@ def handle_text_message(event):
         return
 
     # 🛡️ 智慧過濾機制：
+    # 1. 私訊直接放行
+    # 2. 群組中：只有被 @ 或者包含明確指令才放行，日常閒聊安靜不打擾
+    source_type = event.source.type
+    is_group = (source_type in ["group", "room"])
+    
+    if is_group:
+        is_mentioned = False
+        if hasattr(event.message, 'mention') and event.message.mention and event.message.mention.mentionees:
+            is_mentioned = True
+
+        command_keywords = [
+            "估價", "設定", "刪除", "運動", "健身", "喝水", "本週週報", "上週週報", 
+            "體重走勢", "紀錄", "記錄", "記在", "總結", "更正", "修正", "改為", "換成"
+        ]
+        has_command = any(user_text.startswith(kw) or f" {kw}" in user_text for kw in command_keywords)
+
+        if not (is_mentioned or has_command):
+            return
+
+    user_id = event.source.user_id
+    # 🛡️ 智慧過濾機制：
     # 1. 如果是「私訊 (user)」直接放行，完全不需要任何關鍵字或 @。
     # 2. 如果是「群組 (group/room)」，只要有【被 @ 標記】或者【包含功能關鍵字/食物關鍵字】，就放行！
    source_type = event.source.type
