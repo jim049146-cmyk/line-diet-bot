@@ -753,6 +753,16 @@ def handle_text_message(event):
     if not user_text:
         return
 
+    # 🛡️ 群組訊息過濾防呆機制：只在私訊、被 @標記、或包含功能關鍵字時回應
+    source_type = event.source.type
+    is_group = (source_type in ["group", "room"])
+    
+    keywords = ["估價", "設定", "刪除", "運動", "喝水", "週報", "走勢", "紀錄", "記錄", "記在", "總結", "更正", "修正", "改為", "換成", "備註", "補充"]
+    has_keyword = any(kw in user_text for kw in keywords)
+
+    if is_group and not has_keyword:
+        return
+
     user_id = event.source.user_id
 
     # 1. 股市估價指令
@@ -911,7 +921,7 @@ def handle_text_message(event):
         reply_text = "⚠️ 飲食文字分析發生狀況，請稍後再試一次！"
     reply_line(event.reply_token, reply_text)
 
-# 📸 圖片事件處理
+# 📸 圖片事件處理（圖片無條件處理）
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     message_id = event.message.id
