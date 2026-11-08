@@ -762,8 +762,6 @@ def handle_text_message(event):
         return
 
     # 🛡️ 智慧過濾機制：
-    # 1. 如果是「私訊 (user)」直接放行，完全不需要任何關鍵字或 @。
-    # 2. 如果是「群組 (group/room)」，只有【被 @ 標記】或者【包含明確操作指令】才放行，日常閒聊安靜不打擾！
     source_type = event.source.type
     is_group = (source_type in ["group", "room"])
     
@@ -772,18 +770,25 @@ def handle_text_message(event):
         if hasattr(event.message, 'mention') and event.message.mention and event.message.mention.mentionees:
             is_mentioned = True
 
-        # 🛡️ 群組嚴格防護：只有明確的操作指令，或是直接 @ 機器人才會回應！
         command_keywords = [
             "估價", "設定", "刪除", "運動", "健身", "喝水", "本週週報", "上週週報", 
-            "體重走勢", "紀錄", "記錄", "記在", "總結", "更正", "修正", "改為", "換成"
+            "體重走勢", "紀錄", "記錄", "記在", "總結", "今日總結", "今天的總結", "更正", "修正", "改為", "換成"
         ]
         has_command = any(user_text.startswith(kw) or f" {kw}" in user_text for kw in command_keywords)
 
-        # 在群組中：既沒有被 @，也沒有包含明確指令，就直接安靜返回不處理
         if not (is_mentioned or has_command):
             return
 
     user_id = event.source.user_id
+
+    # 0. 🎯 【優先處理】總結指令（必須放在最前面，才不會被當成食物文字）
+    summary_match = re.search(r"(?:([^\s]+)\s*)?(?:今日總結|今天的總結|總結)", user_text)
+    if summary_match:
+        parsed_name = summary_match.group(1)
+        user_name = parsed_name.replace("查看", "").strip() if parsed_name else get_user_name_by_id(user_id)
+        reply_text = get_daily_summary(user_name, user_id)
+        reply_line(event.reply_token, reply_text)
+        return
 
     # 1. 股市估價指令
     if user_text.startswith("估價"):
@@ -875,7 +880,7 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
-    # 📉 7. 體重走勢指令（會同時發送文字與 14 天體重曲線圖片）
+    # 📉 7. 體重走勢指令
     trend_match = re.search(r"(?:([^\s]+)\s*)?體重走勢", user_text)
     if trend_match:
         img_bytes = generate_weight_chart_bytes(user_id)
@@ -906,15 +911,6 @@ def handle_text_message(event):
         meal_type = record_match.group(2).strip()
         reply_text = confirm_and_save_log(user_id, user_name, meal_type)
         reply_text += "\n\n💡 若剛才不小心記錯，可輸入：`刪除點心1` 或 `刪除第四餐` 進行修正！"
-        reply_line(event.reply_token, reply_text)
-        return
-
-    # 9. 總結指令
-    summary_match = re.search(r"(?:([^\s]+)\s*)?(?:今日總結|今天的總結)", user_text)
-    if summary_match:
-        parsed_name = summary_match.group(1)
-        user_name = parsed_name.replace("查看", "").strip() if parsed_name else get_user_name_by_id(user_id)
-        reply_text = get_daily_summary(user_name, user_id)
         reply_line(event.reply_token, reply_text)
         return
 
