@@ -753,35 +753,27 @@ def handle_text_message(event):
     if not user_text:
         return
 
-    # 🛡️ 群組訊息過濾防呆機制：私訊直接放行；群組中若「有被 @ 標記」或「包含功能關鍵字」才回應
+    # 🛡️ 智慧過濾機制：
+    # 1. 如果是「私訊 (user)」直接放行，完全不需要任何關鍵字或 @。
+    # 2. 如果是「群組 (group/room)」，只要有【被 @ 標記】或者【包含功能關鍵字/食物關鍵字】，就放行！
     source_type = event.source.type
     is_group = (source_type in ["group", "room"])
     
-    # 檢查有沒有在訊息中 @ 機器人 (LINE SDK 的 mention 機制)
-    is_mentioned = False
-    if event.message.mention and event.message.mention.mentionees:
-        for m in event.message.mention.mentionees:
-            # 檢查被標記的人是不是機器人本身 (user_id 吻合或透過 mention 觸發)
+    if is_group:
+        is_mentioned = False
+        if hasattr(event.message, 'mention') and event.message.mention and event.message.mention.mentionees:
             is_mentioned = True
-            break
 
-    keywords = ["估價", "設定", "刪除", "運動", "喝水", "週報", "走勢", "紀錄", "記錄", "記在", "總結", "更正", "修正", "改為", "換成", "備註", "補充"]
-    has_keyword = any(kw in user_text for kw in keywords)
+        # 將常見食物、運動、喝水、估價等指令全部納入白名單
+        keywords = [
+            "估價", "設定", "刪除", "運動", "健身", "喝水", "週報", "走勢", "紀錄", "記錄", "記在", "總結", "更正", "修正", "改為", "換成", "備註", "補充",
+            "蛋", "飯", "麵", "肉", "菜", "水", "咖啡", "茶", "餐", "點心", "吃", "喝", "跑步", "重訓", "有氧"
+        ]
+        has_keyword = any(kw in user_text for kw in keywords)
 
-    # 如果是在群組，且「既沒有被 @ 標記」也「沒有包含功能關鍵字」，就直接忽略
-    if is_group and not (is_mentioned or has_keyword):
-        return
-
-    user_id = event.source.user_id
-
-    # 1. 股市估價指令
-    if user_text.startswith("估價"):
-        ticker = user_text.replace("估價", "").strip()
-        reply_text = "請輸入正確代號，例如：`估價2330`" if not ticker else analyze_stock_value(ticker)
-        reply_line(event.reply_token, reply_text)
-        return
-        
-    # (...後續原本的指令與一般食物文字對話維持不變...)
+        # 在群組中：既沒有被 @，也沒有包含關鍵字，才略過
+        if not (is_mentioned or has_keyword):
+            return
 
     user_id = event.source.user_id
 
