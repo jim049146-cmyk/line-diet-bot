@@ -774,7 +774,7 @@ def handle_text_message(event):
             "估價", "設定", "刪除", "運動", "健身", "喝水", "本週週報", "上週週報", 
             "體重走勢", "紀錄", "記錄", "記在", "總結", "今日總結", "今天的總結", "更正", "修正", "改為", "換成"
         ]
-        has_command = any(user_text.startswith(kw) or f" {kw}" in user_text for kw in command_keywords)
+        has_command = any(kw in user_text for kw in command_keywords)
 
         if not (is_mentioned or has_command):
             return
