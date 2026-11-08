@@ -523,13 +523,14 @@ def generate_weight_chart_bytes(user_id):
     plt.close()
     return buf.getvalue()
 
+# 🛠️ 強制設定 Prompt，絕對禁止回傳 XXg
 SYSTEM_PROMPT = """你是一個專業的飲食控制與健身教練機器人。請針對使用者發送的食物照片或飲食文字進行精準估算。
 
-【強制輸出格式規範】：
+【強制輸出格式與嚴格規定】：
 1. 🍱 估計餐點內容與熱量：
    - 內容描述：簡述辨識出的食物與份量
-   - 熱量：XXX 大卡
-   - 三大營養素：蛋白質 XXg、碳水化合物 XXg、脂肪 XXg
+   - 熱量：XXX 大卡 (必須填寫明確純數字，不可填寫XX)
+   - 三大營養素：蛋白質 數字g、碳水化合物 數字g、脂肪 數字g (絕對禁止使用 XX 代替，必須根據份量估算具體數值！)
 2. 🚦 飲控適合度評級：
    - 🟢 綠燈 / 🟡 黃燈 / 🔴 紅燈
 3. 💡 調整建議：給予 1~2 句具體建議。
@@ -736,6 +737,16 @@ def fallback_to_pb_valuation(stock, clean_ticker, current_price, tech_status, te
         pass
     return f"📊 [{clean_ticker}] 現價：{current_price} 元\n📈 均線：月線 {ma20} | 季線 {ma60}\n• 趨勢：{tech_status}\n• 建議：{tech_advice}"
 
+def reply_line(reply_token, text):
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=text)]
+            )
+        )
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
@@ -787,7 +798,7 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal\n\n💡 若剛才不小心記錯，可輸入：`刪除運動` 進行修正！")
         return
 
-    # 💧 5. 喝水紀錄指令（支援點擊按鈕「喝水」自動跳 Quick Reply 選單，或手動輸入「喝水 500」、「哲瑜喝水 300」）
+    # 💧 5. 喝水紀錄指令
     water_match = re.search(r"(?:([^\s]+)\s*)?喝水(?:\s*(\d+))?", user_text)
     if water_match and not user_text.startswith("刪除"):
         parsed_name = water_match.group(1)
@@ -798,7 +809,6 @@ def handle_text_message(event):
         else:
             user_name = parsed_name
 
-        # 👉 如果只點擊了圖文選單的「喝水」（未帶數字），自動彈出 Quick Reply 浮動按鈕供選擇水量
         if not water_cc_str:
             quick_water_reply = QuickReply(
                 items=[
@@ -823,7 +833,7 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"💧 成功幫 [{user_name}] 記錄喝水 {water_cc} cc！\n• 今日累計總水量：{total_water} cc 🌊")
         return
 
-    # 📈 6. 本週週報指令（支援：本週週報、哲瑜本週週報）
+    # 📈 6. 本週週報指令
     weekly_match = re.search(r"(?:([^\s]+)\s*)?本週週報", user_text)
     if weekly_match:
         parsed_name = weekly_match.group(1)
@@ -853,7 +863,7 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
-    # 9. 總結指令（支援：今日總結、哲瑜今日總結）
+    # 9. 總結指令
     summary_match = re.search(r"(?:([^\s]+)\s*)?(?:今日總結|今天的總結)", user_text)
     if summary_match:
         parsed_name = summary_match.group(1)
@@ -879,55 +889,27 @@ def handle_text_message(event):
         try:
             response = call_gemini_with_retry(combined_prompt)
             reply_text = response.text
-            desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
-            save_pending_analysis(user_id, desc, cal, p, c, f)
+            desc, calories, protein, carbs, fat = parse_nutrition_from_text(reply_text)
+            save_pending_analysis(user_id, desc, calories, protein, carbs, fat)
             current_name = get_user_name_by_id(user_id)
-            reply_text += f"\n\n👉 已成功為你更正餐點內容！確認後可直接輸入：`紀錄在{current_name}的點心1`"
+            reply_text += f"\n\n---------------------------------\n💡 **已依照您的指示修正**！確認無誤後可輸入：`紀錄在{current_name}的點心1`"
         except Exception as e:
-            reply_text = f"⚠️ 更正重新精算發生錯誤: {str(e)}"
+            reply_text = "⚠️ 更正解析發生了一點狀況，請再試一次！"
         reply_line(event.reply_token, reply_text)
         return
 
-    # 11. 防洗板機制：群組內必須包含 @機器人 才觸發
-    is_group_chat = (event.source.type != 'user')
-    bot_mentioned = ("@HabitEats" in user_text) or ("@bot" in user_text) or ("@機器人" in user_text)
-
-    if is_group_chat and not bot_mentioned:
-        return
-
-    clean_text = user_text.replace("@HabitEats", "").replace("@bot", "").replace("@機器人", "").strip()
-    if not clean_text:
-        return
-
-    # 12. 計算全新飲食內容
-    full_prompt = f"{SYSTEM_PROMPT}\n\n使用者輸入的飲食內容：\n{clean_text}"
+    # 11. 一般文字對話（預設當作食物文字描述進行營養估算）
     try:
-        response = call_gemini_with_retry(full_prompt)
+        text_prompt = [SYSTEM_PROMPT, f"請評估以下飲食內容：\n{user_text}"]
+        response = call_gemini_with_retry(text_prompt)
         reply_text = response.text
-        
-        desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
-        save_pending_analysis(user_id, desc, cal, p, c, f)
-        
+        desc, calories, protein, carbs, fat = parse_nutrition_from_text(reply_text)
+        save_pending_analysis(user_id, desc, calories, protein, carbs, fat)
         current_name = get_user_name_by_id(user_id)
-        reply_text += (
-            f"\n\n---------------------------------\n"
-            f"💡 **小提示**：確認這筆內容無誤後，可直接輸入："
-            f"`記錄在{current_name}的點心1` 或 `記{current_name}第1餐` 進行存檔！"
-        )
+        reply_text += f"\n\n---------------------------------\n💡 **小提示**：確認無誤後，可直接輸入：`紀錄在{current_name}的點心1`"
     except Exception as e:
-        reply_text = f"⚠️ 系統錯誤: {str(e)}"
-
+        reply_text = "⚠️ 飲食文字分析發生狀況，請稍後再試一次！"
     reply_line(event.reply_token, reply_text)
-
-def reply_line(reply_token, text):
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[TextMessage(text=text)]
-            )
-        )
 
 # 📸 圖片事件處理
 @handler.add(MessageEvent, message=ImageMessageContent)
@@ -942,26 +924,22 @@ def handle_image_message(event):
             image_bytes = line_bot_blob_api.get_message_content(message_id)
 
         image_part = types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
-
         response = call_gemini_with_retry([SYSTEM_PROMPT, image_part])
         reply_text = response.text
 
-        desc, cal, p, c, f = parse_nutrition_from_text(reply_text)
-        save_pending_analysis(user_id, desc, cal, p, c, f)
-
+        desc, calories, protein, carbs, fat = parse_nutrition_from_text(reply_text)
+        save_pending_analysis(user_id, desc, calories, protein, carbs, fat)
         current_name = get_user_name_by_id(user_id)
         reply_text += (
             f"\n\n---------------------------------\n"
-            f"💡 **小提示**：如果照片辨識內容有誤，可打字加上「更正」！\n"
-            f"確認無誤後，可直接輸入：`紀錄在{current_name}的點心1`"
+            f"💡 **小提示**：確認無誤後，可直接輸入：`紀錄在{current_name}的點心1`"
         )
-
     except Exception as e:
         print("❌ 圖片處理發生錯誤:", traceback.format_exc())
-        reply_text = f"⚠️ 圖片分析時發生了一點狀況，請稍後再試一次！"
+        reply_text = "⚠️ 圖片分析時發生了一點狀況，請稍後再試一次！"
 
     reply_line(reply_token, reply_text)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
