@@ -5,3 +5,4 @@ Pillow
 gunicorn
 tenacity
 yfinance
+matplotlib
