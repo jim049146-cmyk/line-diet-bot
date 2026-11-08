@@ -424,23 +424,31 @@ def get_daily_summary(user_name, user_id):
         f"💡 **教練總結講評**：\n{coach_comment}"
     )
 
-def get_weekly_report(user_name, user_id):
-    today = datetime.now().strftime("%Y-%m-%d")
+def get_weekly_report(user_name, user_id, report_type="this_week"):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    cursor.execute('''
+    if report_type == "last_week":
+        # 上週：從 13 天前 到 7 天前（剛好 7 天）
+        date_condition = "log_date >= date('now', '-13 days') AND log_date <= date('now', '-7 days')"
+        period_title = "上週（前一個 7 天區間）"
+    else:
+        # 本週：從 6 天前到今天（剛好 7 天）
+        date_condition = "log_date >= date('now', '-6 days') AND log_date <= date('now', 'localtime')"
+        period_title = "本週（最近 7 天）"
+
+    cursor.execute(f'''
         SELECT log_date, SUM(calories), SUM(protein), SUM(carbs), SUM(fat)
         FROM daily_logs
-        WHERE user_id = ? AND log_date >= date('now', '-7 days')
+        WHERE user_id = ? AND {date_condition}
         GROUP BY log_date
     ''', (user_id,))
     daily_food = cursor.fetchall()
     
-    cursor.execute('''
+    cursor.execute(f'''
         SELECT SUM(est_calories)
         FROM workout_logs
-        WHERE user_id = ? AND log_date >= date('now', '-7 days')
+        WHERE user_id = ? AND {date_condition}
     ''', (user_id,))
     total_workout_week = cursor.fetchone()[0] or 0
     
@@ -461,15 +469,15 @@ def get_weekly_report(user_name, user_id):
         
     avg_deficit = int(tdee - avg_cal)
 
-    coach_weekly = "本週飲食與運動維持得不錯，請繼續保持節奏！"
+    coach_weekly = "該區間飲食與運動維持得不錯，請繼續保持節奏！"
     try:
         w_prompt = (
-            f"你是一位專業健身教練。請根據學員【{user_name}】過去 7 天的平均數據給出精簡週報建議（150字內）：\n"
+            f"你是一位專業健身教練。請根據學員【{user_name}】在【{period_title}】的平均數據給出精簡週報建議（150字內）：\n"
             f"- 估算 TDEE：{int(tdee)} kcal\n"
             f"- 平均每日攝取熱量：{avg_cal} kcal\n"
             f"- 平均每日熱量赤字：{avg_deficit} kcal\n"
             f"- 平均每日蛋白質：{avg_protein}g\n"
-            f"- 本週累計運動消耗：{total_workout_week} kcal\n"
+            f"- 該區間累計運動消耗：{total_workout_week} kcal\n"
             f"- 有紀錄天數：{active_days} 天\n"
         )
         res = call_gemini_with_retry(w_prompt)
@@ -478,17 +486,17 @@ def get_weekly_report(user_name, user_id):
         pass
 
     return (
-        f"📈 [{user_name}] 近 7 天週期健康週報\n"
-        f"📅 統計區間：近 7 天\n"
+        f"📈 [{user_name}] {period_title}健康週報\n"
         f"---------------------------------\n"
         f"🔥 平均每日熱量：{avg_cal} / {int(tdee)} kcal\n"
         f"📉 平均每日赤字：{avg_deficit} kcal\n"
         f"🥩 平均每日蛋白質：{avg_protein} g\n"
-        f"🏃 本週運動總消耗：-{total_workout_week} kcal\n"
+        f"🏃 區間運動總消耗：-{total_workout_week} kcal\n"
+        f"• 紀錄天數：{active_days} 天\n"
         f"---------------------------------\n"
         f"💡 **教練週期策略建議**：\n{coach_weekly}\n"
         f"---------------------------------\n"
-        f"👉 點擊下方圖文選單按鈕可隨時查看體重走勢！"
+        f"👉 隨時輸入 `本週週報` 或 `上週週報` 可切換查看！"
     )
 
 def generate_weight_chart_bytes(user_id):
