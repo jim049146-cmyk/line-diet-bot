@@ -596,6 +596,14 @@ def callback():
 def home():
     return "Diet & Stock Bot is running!"
 
+# 📉 專門用來提供 14 天體重走勢圖的動態圖片路由（讓 LINE 可以順利抓圖顯示）
+@app.route("/weight_chart/<user_id>.png")
+def weight_chart_image(user_id):
+    img_bytes = generate_weight_chart_bytes(user_id)
+    if not img_bytes:
+        return "No chart data", 404
+    return send_file(io.BytesIO(img_bytes), mimetype='image/png')
+
 def analyze_stock_value(ticker_symbol: str) -> str:
     clean_ticker = ticker_symbol.strip().upper()
     full_ticker = clean_ticker if (clean_ticker.endswith(".TW") or clean_ticker.endswith(".TWO")) else f"{clean_ticker}.TW"
@@ -864,7 +872,7 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
-    # 📉 7. 體重走勢指令
+    # 📉 7. 體重走勢指令（會同時發送文字與 14 天體重曲線圖片）
     trend_match = re.search(r"(?:([^\s]+)\s*)?體重走勢", user_text)
     if trend_match:
         img_bytes = generate_weight_chart_bytes(user_id)
@@ -872,7 +880,21 @@ def handle_text_message(event):
             reply_line(event.reply_token, "⚠️ 目前尚無足夠的體重歷史紀錄可繪製走勢圖！\n(可先輸入：`設定 你的名字 身高 170 體重 70 體脂 18 目標 減脂` 建立檔案)")
             return
         
-        reply_line(event.reply_token, "📉 你的近期體重走勢圖已統計完畢！")
+        # 自動抓取目前的 Render 伺服器公開網址
+        base_url = request.host_url.rstrip('/')
+        chart_url = f"{base_url}/weight_chart/{user_id}.png"
+
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[
+                        TextMessage(text="📉 你的近期 14 天體重走勢圖："),
+                        ImageMessage(original_content_url=chart_url, preview_image_url=chart_url)
+                    ]
+                )
+            )
         return
 
     # 8. 存入帳本指令
