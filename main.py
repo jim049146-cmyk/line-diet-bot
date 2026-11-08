@@ -753,15 +753,35 @@ def handle_text_message(event):
     if not user_text:
         return
 
-    # 🛡️ 群組訊息過濾防呆機制：只在私訊、被 @標記、或包含功能關鍵字時回應
+    # 🛡️ 群組訊息過濾防呆機制：私訊直接放行；群組中若「有被 @ 標記」或「包含功能關鍵字」才回應
     source_type = event.source.type
     is_group = (source_type in ["group", "room"])
     
+    # 檢查有沒有在訊息中 @ 機器人 (LINE SDK 的 mention 機制)
+    is_mentioned = False
+    if event.message.mention and event.message.mention.mentionees:
+        for m in event.message.mention.mentionees:
+            # 檢查被標記的人是不是機器人本身 (user_id 吻合或透過 mention 觸發)
+            is_mentioned = True
+            break
+
     keywords = ["估價", "設定", "刪除", "運動", "喝水", "週報", "走勢", "紀錄", "記錄", "記在", "總結", "更正", "修正", "改為", "換成", "備註", "補充"]
     has_keyword = any(kw in user_text for kw in keywords)
 
-    if is_group and not has_keyword:
+    # 如果是在群組，且「既沒有被 @ 標記」也「沒有包含功能關鍵字」，就直接忽略
+    if is_group and not (is_mentioned or has_keyword):
         return
+
+    user_id = event.source.user_id
+
+    # 1. 股市估價指令
+    if user_text.startswith("估價"):
+        ticker = user_text.replace("估價", "").strip()
+        reply_text = "請輸入正確代號，例如：`估價2330`" if not ticker else analyze_stock_value(ticker)
+        reply_line(event.reply_token, reply_text)
+        return
+        
+    # (...後續原本的指令與一般食物文字對話維持不變...)
 
     user_id = event.source.user_id
 
