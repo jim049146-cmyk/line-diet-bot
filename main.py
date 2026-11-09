@@ -4,7 +4,7 @@ import re
 import sqlite3
 import traceback
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use('Agg')  # 避免伺服器環境無 GUI 報錯
 import matplotlib.pyplot as plt
@@ -51,6 +51,10 @@ MODEL_ID = "gemini-3.5-flash-lite"
 # 初始化 LINE SDK 與 handler
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# 🕒 取得台灣時區（UTC+8）的今日日期字串
+def get_tw_today():
+    return (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d")
 
 # ----------------------------------------------------
 # 🗄️ SQLite 資料庫模組
@@ -128,7 +132,7 @@ def init_db():
 
 init_db()
 
-# --- 資料庫操作輔助函式 ---
+# --- 資料庫操作輔助函式（全面鎖定台灣時區） ---
 def get_user_name_by_id(user_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -147,7 +151,7 @@ def save_user_profile(user_id, user_name, height, weight, body_fat, goal):
         VALUES (?, ?, ?, ?, ?, ?)
     ''', (user_id, user_name, height, weight, body_fat, goal))
     
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_tw_today()
     cursor.execute('''
         INSERT INTO weight_history (user_id, log_date, weight, body_fat)
         VALUES (?, ?, ?, ?)
@@ -159,7 +163,7 @@ def save_user_profile(user_id, user_name, height, weight, body_fat, goal):
 def save_pending_analysis(user_id, description, calories, protein, carbs, fat):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         INSERT OR REPLACE INTO pending_logs (user_id, description, calories, protein, carbs, fat, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -210,7 +214,7 @@ def confirm_and_save_log(user_id, user_name, meal_input):
             meal_type = "第3餐"
 
     desc, calories, protein, carbs, fat = row
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_tw_today()
     
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -231,7 +235,7 @@ def confirm_and_save_log(user_id, user_name, meal_input):
     )
 
 def save_workout_log(user_id, user_name, workout_desc, est_calories):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_tw_today()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -242,7 +246,7 @@ def save_workout_log(user_id, user_name, workout_desc, est_calories):
     conn.close()
 
 def save_water_log(user_id, user_name, water_cc):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_tw_today()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -257,7 +261,7 @@ def save_water_log(user_id, user_name, water_cc):
     return total_water
 
 def delete_log_dynamically(user_id, user_text):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_tw_today()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -336,7 +340,7 @@ def delete_log_dynamically(user_id, user_text):
             return "⚠️ 你今天尚無任何已記錄的飲食資料可刪除。"
 
 def get_daily_summary(user_name, user_id):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_tw_today()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -429,12 +433,12 @@ def get_weekly_report(user_name, user_id, report_type="this_week"):
     cursor = conn.cursor()
     
     if report_type == "last_week":
-        # 上週：從 13 天前 到 7 天前（剛好 7 天）
-        date_condition = "log_date >= date('now', '-13 days') AND log_date <= date('now', '-7 days')"
+        # 上週：強制使用台灣時區偏移計算前一個 7 天區間
+        date_condition = "log_date >= date('now', '+8 hours', '-13 days') AND log_date <= date('now', '+8 hours', '-7 days')"
         period_title = "上週（前一個 7 天區間）"
     else:
-        # 本週：從 6 天前到今天（剛好 7 天）
-        date_condition = "log_date >= date('now', '-6 days') AND log_date <= date('now', 'localtime')"
+        # 本週：強制使用台灣時區偏移計算最近 7 天
+        date_condition = "log_date >= date('now', '+8 hours', '-6 days') AND log_date <= date('now', '+8 hours')"
         period_title = "本週（最近 7 天）"
 
     cursor.execute(f'''
@@ -604,7 +608,6 @@ def callback():
 def home():
     return "Diet & Stock Bot is running!"
 
-# 📉 專門用來提供 14 天體重走勢圖的動態圖片路由（讓 LINE 可以順利抓圖顯示）
 @app.route("/weight_chart/<user_id>.png")
 def weight_chart_image(user_id):
     img_bytes = generate_weight_chart_bytes(user_id)
@@ -789,7 +792,7 @@ def handle_text_message(event):
 
     user_id = event.source.user_id
 
-    # 0. 🎯 【優先處理】總結指令（必須放在最前面，才不會被當成食物文字）
+    # 0. 🎯 【優先處理】總結指令
     summary_match = re.search(r"(?:([^\s]+)\s*)?(?:今日總結|今天的總結|總結)", user_text)
     if summary_match:
         parsed_name = summary_match.group(1)
@@ -961,7 +964,7 @@ def handle_text_message(event):
         reply_text = "⚠️ 飲食文字分析發生狀況，請稍後再試一次！"
     reply_line(event.reply_token, reply_text)
 
-# 📸 圖片事件處理（圖片無條件處理）
+# 📸 圖片事件處理
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     message_id = event.message.id
