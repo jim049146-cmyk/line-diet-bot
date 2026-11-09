@@ -141,7 +141,7 @@ def get_user_name_by_id(user_id):
     conn.close()
     if row and row[0]:
         return row[0]
-    return "學員"
+    return "哲瑜"  # 預設直接回傳你的名字，避免變成學員
 
 def save_user_profile(user_id, user_name, height, weight, body_fat, goal):
     conn = sqlite3.connect(DB_FILE)
@@ -433,11 +433,9 @@ def get_weekly_report(user_name, user_id, report_type="this_week"):
     cursor = conn.cursor()
     
     if report_type == "last_week":
-        # 上週：強制使用台灣時區偏移計算前一個 7 天區間
         date_condition = "log_date >= date('now', '+8 hours', '-13 days') AND log_date <= date('now', '+8 hours', '-7 days')"
         period_title = "上週（前一個 7 天區間）"
     else:
-        # 本週：強制使用台灣時區偏移計算最近 7 天
         date_condition = "log_date >= date('now', '+8 hours', '-6 days') AND log_date <= date('now', '+8 hours')"
         period_title = "本週（最近 7 天）"
 
@@ -792,11 +790,10 @@ def handle_text_message(event):
 
     user_id = event.source.user_id
 
-    # 0. 🎯 【優先處理】總結指令
-    summary_match = re.search(r"(?:([^\s]+)\s*)?(?:今日總結|今天的總結|總結)", user_text)
-    if summary_match:
-        parsed_name = summary_match.group(1)
-        user_name = parsed_name.replace("查看", "").strip() if parsed_name else get_user_name_by_id(user_id)
+    # 0. 🎯 【優先處理】總結指令（防呆版：直接用「總結」關鍵字，絕對不會把「今日」誤判成名字）
+    if "總結" in user_text:
+        clean_name = user_text.replace("今日總結", "").replace("今天的總結", "").replace("總結", "").strip()
+        user_name = clean_name if clean_name else get_user_name_by_id(user_id)
         reply_text = get_daily_summary(user_name, user_id)
         reply_line(event.reply_token, reply_text)
         return
@@ -826,11 +823,10 @@ def handle_text_message(event):
         reply_line(event.reply_token, reply_text)
         return
 
-    # 4. 運動紀錄指令
-    workout_match = re.search(r"([^\s]+)\s*運動\s*(.+)", user_text)
-    if workout_match:
-        user_name = workout_match.group(1).strip()
-        workout_desc = workout_match.group(2).strip()
+    # 4. 運動紀錄指令（防呆版：不強求前方一定要打名字，預設直接抓你的資料庫名字）
+    if "運動" in user_text or "健身" in user_text:
+        workout_desc = user_text.replace("運動", "").replace("健身", "").strip()
+        user_name = get_user_name_by_id(user_id)
         
         try:
             w_prompt = f"請評估以下運動內容大約消耗多少大卡（以一般成人體重估算），只要回傳一個數字（例如：350）：\n{workout_desc}"
@@ -844,18 +840,12 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal\n\n💡 若剛才不小心記錯，可輸入：`刪除運動` 進行修正！")
         return
 
-    # 💧 5. 喝水紀錄指令
-    water_match = re.search(r"(?:([^\s]+)\s*)?喝水(?:\s*(\d+))?", user_text)
-    if water_match and not user_text.startswith("刪除"):
-        parsed_name = water_match.group(1)
-        water_cc_str = water_match.group(2)
+    # 💧 5. 喝水紀錄指令（防呆版：直接抓內建名字，絕不誤判）
+    if "喝水" in user_text and not user_text.startswith("刪除"):
+        water_cc_match = re.search(r'(\d+)', user_text)
+        user_name = get_user_name_by_id(user_id)
 
-        if not parsed_name or parsed_name == "哲瑜":
-            user_name = get_user_name_by_id(user_id)
-        else:
-            user_name = parsed_name
-
-        if not water_cc_str:
+        if not water_cc_match:
             quick_water_reply = QuickReply(
                 items=[
                     QuickReplyItem(action=MessageAction(label="🥛 200 cc", text="喝水 200")),
@@ -874,29 +864,24 @@ def handle_text_message(event):
                 )
             return
 
-        water_cc = int(water_cc_str)
+        water_cc = int(water_cc_match.group(1))
         total_water = save_water_log(user_id, user_name, water_cc)
         reply_line(event.reply_token, f"💧 成功幫 [{user_name}] 記錄喝水 {water_cc} cc！\n• 今日累計總水量：{total_water} cc 🌊")
         return
 
     # 📈 6. 本週與上週週報指令
-    weekly_match = re.search(r"(?:([^\s]+)\s*)?(本週週報|上週週報)", user_text)
-    if weekly_match:
-        parsed_name = weekly_match.group(1)
-        report_cmd = weekly_match.group(2)
-        user_name = parsed_name if parsed_name else get_user_name_by_id(user_id)
-        
-        report_type = "last_week" if "上週" in report_cmd else "this_week"
+    if "週報" in user_text:
+        report_type = "last_week" if "上週" in user_text else "this_week"
+        user_name = get_user_name_by_id(user_id)
         reply_text = get_weekly_report(user_name, user_id, report_type)
         reply_line(event.reply_token, reply_text)
         return
 
     # 📉 7. 體重走勢指令
-    trend_match = re.search(r"(?:([^\s]+)\s*)?體重走勢", user_text)
-    if trend_match:
+    if "體重走勢" in user_text:
         img_bytes = generate_weight_chart_bytes(user_id)
         if not img_bytes:
-            reply_line(event.reply_token, "⚠️ 目前尚無足夠的體重歷史紀錄可繪製走勢圖！\n(可先輸入：`設定 你的名字 身高 170 體重 70 體脂 18 目標 減脂` 建立檔案)")
+            reply_line(event.reply_token, "⚠️ 目前尚無足夠的體重歷史紀錄可繪製走勢圖！\n(可先輸入：`設定 哲瑜 身高 170 體重 70 體脂 18 目標 減脂` 建立檔案)")
             return
         
         base_url = request.host_url.rstrip('/')
