@@ -770,7 +770,17 @@ def handle_text_message(event):
     if not user_text:
         return
 
-    # 🛡️ 智慧過濾機制：
+    user_id = event.source.user_id
+
+    # 0. 🎯 【最高優先級】總結指令（放在群組過濾器之前，私聊/群組都能秒回）
+    if "總結" in user_text:
+        clean_name = user_text.replace("今日總結", "").replace("今天的總結", "").replace("總結", "").strip()
+        user_name = clean_name if clean_name else get_user_name_by_id(user_id)
+        reply_text = get_daily_summary(user_name, user_id)
+        reply_line(event.reply_token, reply_text)
+        return
+
+    # 🛡️ 智慧過濾機制（針對群組一般聊天）：
     source_type = event.source.type
     is_group = (source_type in ["group", "room"])
     
@@ -781,22 +791,12 @@ def handle_text_message(event):
 
         command_keywords = [
             "估價", "設定", "刪除", "運動", "健身", "喝水", "本週週報", "上週週報", 
-            "體重走勢", "紀錄", "記錄", "記在", "總結", "今日總結", "今天的總結", "更正", "修正", "改為", "換成"
+            "體重走勢", "紀錄", "記錄", "記在", "更正", "修正", "改為", "換成"
         ]
         has_command = any(kw in user_text for kw in command_keywords)
 
         if not (is_mentioned or has_command):
             return
-
-    user_id = event.source.user_id
-
-    # 0. 🎯 【優先處理】總結指令（防呆版：直接用「總結」關鍵字，絕對不會把「今日」誤判成名字）
-    if "總結" in user_text:
-        clean_name = user_text.replace("今日總結", "").replace("今天的總結", "").replace("總結", "").strip()
-        user_name = clean_name if clean_name else get_user_name_by_id(user_id)
-        reply_text = get_daily_summary(user_name, user_id)
-        reply_line(event.reply_token, reply_text)
-        return
 
     # 1. 股市估價指令
     if user_text.startswith("估價"):
