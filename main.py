@@ -141,7 +141,7 @@ def get_user_name_by_id(user_id):
     conn.close()
     if row and row[0]:
         return row[0]
-    return "哲瑜"  # 預設直接回傳你的名字，避免變成學員
+    return "學員"  # 未設定過的人一律叫學員，絕不冒用哲瑜
 
 def save_user_profile(user_id, user_name, height, weight, body_fat, goal):
     conn = sqlite3.connect(DB_FILE)
@@ -840,10 +840,9 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal\n\n💡 若剛才不小心記錯，可輸入：`刪除運動` 進行修正！")
         return
 
-    # 💧 5. 喝水紀錄指令（防呆版：直接抓內建名字，絕不誤判）
+# 💧 5. 喝水紀錄指令（嚴格只認 user_id，絕不被前面的暱稱誤導）
     if "喝水" in user_text and not user_text.startswith("刪除"):
         water_cc_match = re.search(r'(\d+)', user_text)
-        user_name = get_user_name_by_id(user_id)
 
         if not water_cc_match:
             quick_water_reply = QuickReply(
