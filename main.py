@@ -840,8 +840,12 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal\n\n💡 若剛才不小心記錯，可輸入：`刪除運動` 進行修正！")
         return
 
-# 💧 5. 喝水紀錄指令（完美支援純打「喝水」叫選單，以及「喝水 500」直接記錄）
+# 💧 5. 喝水紀錄指令（確保 user_name 在最前面就已經定義）
     if "喝水" in user_text and not user_text.startswith("刪除"):
+        # 確保 user_id 與 user_name 在這時候已經完整抓到
+        user_id = event.source.user_id
+        user_name = get_user_name_by_id(user_id)
+        
         water_cc_match = re.search(r'喝水\s*(\d+)', user_text)
 
         # 如果只有打「喝水」（或後面沒有數字），就跳出快速選擇按鈕
@@ -869,14 +873,6 @@ def handle_text_message(event):
         total_water = save_water_log(user_id, user_name, water_cc)
         reply_line(event.reply_token, f"💧 成功幫 [{user_name}] 記錄喝水 {water_cc} cc！\n• 今日累計總水量：{total_water} cc 🌊")
         return
-    # 📈 6. 本週與上週週報指令
-    if "週報" in user_text:
-        report_type = "last_week" if "上週" in user_text else "this_week"
-        user_name = get_user_name_by_id(user_id)
-        reply_text = get_weekly_report(user_name, user_id, report_type)
-        reply_line(event.reply_token, reply_text)
-        return
-
     # 📉 7. 體重走勢指令
     if "體重走勢" in user_text:
         img_bytes = generate_weight_chart_bytes(user_id)
