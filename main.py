@@ -840,10 +840,11 @@ def handle_text_message(event):
         reply_line(event.reply_token, f"🏃 [{user_name}] 運動紀錄已存檔！\n• 項目：{workout_desc}\n• 預估消耗：-{est_cal} kcal\n\n💡 若剛才不小心記錯，可輸入：`刪除運動` 進行修正！")
         return
 
-# 💧 5. 喝水紀錄指令（嚴格只認 user_id，絕不被前面的暱稱誤導）
+# 💧 5. 喝水紀錄指令（完美支援純打「喝水」叫選單，以及「喝水 500」直接記錄）
     if "喝水" in user_text and not user_text.startswith("刪除"):
-        water_cc_match = re.search(r'(\d+)', user_text)
+        water_cc_match = re.search(r'喝水\s*(\d+)', user_text)
 
+        # 如果只有打「喝水」（或後面沒有數字），就跳出快速選擇按鈕
         if not water_cc_match:
             quick_water_reply = QuickReply(
                 items=[
@@ -863,11 +864,11 @@ def handle_text_message(event):
                 )
             return
 
+        # 如果有帶數字（例如：喝水 500），就直接抓取數字存檔
         water_cc = int(water_cc_match.group(1))
         total_water = save_water_log(user_id, user_name, water_cc)
         reply_line(event.reply_token, f"💧 成功幫 [{user_name}] 記錄喝水 {water_cc} cc！\n• 今日累計總水量：{total_water} cc 🌊")
         return
-
     # 📈 6. 本週與上週週報指令
     if "週報" in user_text:
         report_type = "last_week" if "上週" in user_text else "this_week"
